@@ -1,0 +1,41 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+build/
+dist/
+
+# environments
+.venv*
+venv/
+.env
+
+# run outputs, logs, caches
+runs/
+outputs/
+logs/
+*.log
+.tokenizer-cache
+.libero-config*
+MUJOCO_LOG.TXT
+
+# model weights (scripts/download_models.sh; CAPTAIN_MODELS_DIR defaults to models/)
+/models/
+/weights/
+/checkpoints/
+*.safetensors
+*.pt
+*.pth
+*.ckpt
+
+# fetched third-party code (scripts/setup_third_party.sh)
+third_party/*
+!third_party/manifest.json
+
+# editors / OS
+.idea/
+.vscode/
+.DS_Store

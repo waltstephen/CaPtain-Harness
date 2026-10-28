@@ -1,0 +1,39 @@
+cff-version: 1.2.0
+message: "If you use CaPtain-Harness, please cite the CaPtain paper below."
+title: "CaPtain-Harness"
+type: software
+license: MIT
+version: "1.0.0"
+repository-code: "https://github.com/waltstephen/CaPtain-Harness"
+date-released: "2026-10-28"
+authors:
+  - family-names: "Fan"
+    given-names: "Yijia"
+  - family-names: "He"
+    given-names: "Xilin"
+  - family-names: "Jiang"
+    given-names: "Yilei"
+  - family-names: "Wu"
+    given-names: "Dongming"
+  - family-names: "Wang"
+    given-names: "Jiaxu"
+  - family-names: "Yue"
+    given-names: "Xiangyu"
+preferred-citation:
+  type: article
+  title: "CaPtain: A Pipeline for Post-Training Code-as-Policy Robot Agents"
+  authors:
+    - family-names: "Fan"
+      given-names: "Yijia"
+    - family-names: "He"
+      given-names: "Xilin"
+    - family-names: "Jiang"
+      given-names: "Yilei"
+    - family-names: "Wu"
+      given-names: "Dongming"
+    - family-names: "Wang"
+      given-names: "Jiaxu"
+    - family-names: "Yue"
+      given-names: "Xiangyu"
+  year: 2026
+  notes: "Preprint; arXiv identifier coming soon."
