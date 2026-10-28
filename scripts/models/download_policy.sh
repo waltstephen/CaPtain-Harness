@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # The policy model: CaPtain-4B (SFT + RL) or CaPtain-4B-SFT, both post-trained from Qwen3.5-4B (Apache-2.0).
-# The public Hugging Face repos are COMING SOON; until then CAPTAIN_HF_USER is a placeholder and this script only prints
-# what to do. You do not need these weights to use the harness: any OpenAI-compatible chat endpoint works.
+# Weights: https://huggingface.co/YijiaFan/CaPtain-4B and https://huggingface.co/YijiaFan/CaPtain-4B-SFT.
+# You do not need these weights to use the harness: any OpenAI-compatible chat endpoint works.
 #
 # Usage: scripts/models/download_policy.sh [4b|4b-sft] [--dry-run]
-#   CAPTAIN_HF_USER     Hugging Face user/org that hosts the weights   [<hf-user>, placeholder]
+#   CAPTAIN_HF_USER     Hugging Face user/org that hosts the weights   [YijiaFan]
 #   CAPTAIN_POLICY_REPO full repo id, overrides the two above          [$CAPTAIN_HF_USER/CaPtain-4B or .../CaPtain-4B-SFT]
 # Result: $CAPTAIN_MODELS_DIR/CaPtain-4B[-SFT]  ->  services/serve_policy.sh $CAPTAIN_MODELS_DIR/CaPtain-4B 8600
 #
@@ -16,16 +16,9 @@ source "$(dirname "$0")/_common.sh"
 variant=4b
 for a in "$@"; do case "$a" in 4b|4b-sft) variant=$a ;; esac; done
 name=CaPtain-4B; [ "$variant" = 4b-sft ] && name=CaPtain-4B-SFT
-HF_USER=${CAPTAIN_HF_USER:-<hf-user>}
+HF_USER=${CAPTAIN_HF_USER:-YijiaFan}
 REPO=${CAPTAIN_POLICY_REPO:-$HF_USER/$name}
 DEST=$MODELS_DIR/$name
-case "$REPO" in
-  *"<hf-user>"*)
-    log "$name on Hugging Face: coming soon (repo id $REPO is a placeholder)."
-    log "Once published: CAPTAIN_HF_USER=<owner> scripts/models/download_policy.sh $variant"
-    log "Meanwhile point the harness at any OpenAI-compatible endpoint: export POLICY_URL=http://<host>:<port>/v1"
-    exit 0 ;;
-esac
 if is_done "$DEST"; then log "already present: $DEST (FORCE=1 to re-download)"; else
   log "downloading $REPO -> $DEST (~10 GB, bf16)"
   run mkdir -p "$DEST"

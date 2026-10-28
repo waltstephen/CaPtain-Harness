@@ -25,7 +25,7 @@ talks to the harness over a pipe; a MuJoCo kinematic twin built from the robot's
    ```bash
    python3.11 -m venv .venv-transfer && .venv-transfer/bin/pip install -r requirements-transfer.txt
    ```
-3. Serve the policy (`services/serve_policy.sh <hf-user>/CaPtain-4B 8600`) and start SAM3 + Molmo2-8B (`services/start_perception.sh`).
+3. Serve the policy (`services/serve_policy.sh YijiaFan/CaPtain-4B 8600`) and start SAM3 + Molmo2-8B (`services/start_perception.sh`).
 4. Run a task list and score it:
    ```bash
    export POLICY_URL=http://127.0.0.1:8600/v1 STUDENT_PYTHON=~/envs/student-py311/bin/python SIM_GPU=0

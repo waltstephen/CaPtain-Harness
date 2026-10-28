@@ -58,7 +58,7 @@ export STUDENT_PYTHON=~/envs/student-py311/bin/python
 |---|---|---|---|---|
 | SAM 3 segmentation (CaP-X FastAPI server) | 8114 | `facebook/sam3` (`sam3.pt`), **gated** | `scripts/models/download_sam3.sh` | every backend |
 | Molmo2-8B pointing (vLLM) | 8122 | `allenai/Molmo2-8B` @ `e28fa28597e5ec5e0cca2201dd8ab33d48bc4a1b` | `scripts/models/download_molmo2.sh` | every backend |
-| Policy (vLLM, OpenAI-compatible) | 8600 | CaPtain-4B / CaPtain-4B-SFT (coming soon), or any model | `scripts/models/download_policy.sh` | every backend |
+| Policy (vLLM, OpenAI-compatible) | 8600 | CaPtain-4B / CaPtain-4B-SFT, or any model | `scripts/models/download_policy.sh` | every backend |
 | MoGe-2 monocular depth | 8130 | `Ruicheng/moge-2-vitl-normal` @ `cb0e8bbd6b1e243589717c78e750b1ba4c093acf` | `scripts/models/download_moge.sh` | only `hardware_real` cameras without a depth sensor |
 
 ```bash

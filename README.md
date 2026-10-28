@@ -4,9 +4,9 @@
 
 **One low-level robot API for code-as-policy agents: run any OpenAI-compatible model on LIBERO-family, RoboTwin 2.0, RoboDojo, SimplerEnv, CaP-Bench and real robots**
 
+[![Project Page](https://img.shields.io/badge/Project-Page-blue?logo=github)](https://waltstephen.github.io/captain/)
 [![CaPtain](https://img.shields.io/badge/GitHub-CaPtain%20pipeline-black?logo=github)](https://github.com/waltstephen/CaPtain)
-[![arXiv](https://img.shields.io/badge/arXiv-coming%20soon-b31b1b?logo=arxiv)](#)
-[![Hugging Face](https://img.shields.io/badge/%F0%9F%A4%97%20Hugging%20Face-CaPtain--4B%20(coming%20soon)-orange)](#)
+[![Hugging Face](https://img.shields.io/badge/%F0%9F%A4%97%20Hugging%20Face-CaPtain--4B-orange)](https://huggingface.co/YijiaFan/CaPtain-4B)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 ![Python](https://img.shields.io/badge/python-3.10%20%7C%203.11-blue)
 
@@ -40,7 +40,7 @@ which includes this repository as a pinned submodule.
 
 - **[2026/10]** 🔥 CaPtain-Harness released as a standalone repository: all backends, evaluation runners, task lists, scorers,
   perception services and model download scripts.
-- **Coming soon** 🤗 CaPtain-4B and CaPtain-4B-SFT on Hugging Face · 📄 paper on arXiv.
+- **[2026/10]** 🤗 [CaPtain-4B](https://huggingface.co/YijiaFan/CaPtain-4B) and [CaPtain-4B-SFT](https://huggingface.co/YijiaFan/CaPtain-4B-SFT) on Hugging Face · 🌐 [project page](https://waltstephen.github.io/captain/).
 
 ## Installation
 
@@ -78,7 +78,7 @@ CAPTAIN_MODELS_DIR=/data/models scripts/download_models.sh [--dry-run] [sam3 mol
 | SAM 3 | `facebook/sam3` (`sam3.pt`). **Gated:** accept the SAM License on its model page, then `export HF_TOKEN` | segmentation service, port 8114 (required) | `scripts/models/download_sam3.sh` |
 | Molmo2-8B | `allenai/Molmo2-8B` @ `e28fa28` | pointing service, port 8122 (required) | `scripts/models/download_molmo2.sh` |
 | MoGe-2 | `Ruicheng/moge-2-vitl-normal` @ `cb0e8bb` | monocular depth, port 8130 (optional: only the hardware backend, for cameras without a depth sensor) | `scripts/models/download_moge.sh` |
-| CaPtain-4B / CaPtain-4B-SFT | `<hf-user>/CaPtain-4B`, `<hf-user>/CaPtain-4B-SFT` (**coming soon**) | policy, port 8600 | `scripts/models/download_policy.sh` |
+| CaPtain-4B / CaPtain-4B-SFT | `YijiaFan/CaPtain-4B`, `YijiaFan/CaPtain-4B-SFT` | policy, port 8600 | `scripts/models/download_policy.sh` |
 
 The scripts can be re-run safely, print every command they run (`--dry-run` only prints), and never store tokens. You do not
 need the CaPtain weights to use the harness: point it at **any OpenAI-compatible endpoint** with

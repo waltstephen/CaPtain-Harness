@@ -5,7 +5,7 @@
 # Tested with vLLM 0.29.0 (+cu129, torch 2.13) and transformers 5.17. One 80 GB GPU serves ~8 concurrent episodes comfortably;
 # the paper ran <= 8 episodes per policy server. Add VLLM_USE_FLASHINFER_SAMPLER=0 if FlashInfer JIT is unavailable on your host.
 set -euo pipefail
-MODEL=${1:?model dir or HF id (e.g. <hf-user>/CaPtain-4B)}; PORT=${2:-8600}
+MODEL=${1:?model dir or HF id (e.g. YijiaFan/CaPtain-4B)}; PORT=${2:-8600}
 LOG_DIR=${LOG_DIR:-$PWD/logs/services}; mkdir -p "$LOG_DIR"
 CUDA_VISIBLE_DEVICES=${POLICY_GPU:-0} setsid nohup "${VLLM_BIN:-vllm}" serve "$MODEL" --served-model-name "${SERVED_NAME:-captain-4b}" \
   --host "${HOST:-127.0.0.1}" --port "$PORT" --dtype bfloat16 --gpu-memory-utilization "${POLICY_GPU_UTIL:-0.60}" \

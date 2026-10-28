@@ -73,7 +73,7 @@ See [INSTALL.md](../INSTALL.md) (harness, agent Python, perception services, per
 
 ```bash
 # policy: CaPtain-4B (or CaPtain-4B-SFT) with vLLM 0.29 (Qwen3.5 support), one GPU
-services/serve_policy.sh <hf-user>/CaPtain-4B 8600          # or a local model dir
+services/serve_policy.sh YijiaFan/CaPtain-4B 8600          # or a local model dir
 
 # one LIBERO episode with the paper protocol (T=1, top_p=1, 60-request cap, 1080 s, thinking on)
 POLICY_URL=http://127.0.0.1:8600/v1 STUDENT_PYTHON=$STUDENT_PYTHON EGL_DEVICE=0 \

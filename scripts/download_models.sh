@@ -7,8 +7,8 @@
 #   sam3      facebook/sam3 sam3.pt                  segmentation service :8114   required   ~3.5 GB  GATED: accept the SAM License, export HF_TOKEN
 #   molmo2    allenai/Molmo2-8B @ e28fa28            pointing service :8122       required   ~35 GB
 #   moge      Ruicheng/moge-2-vitl-normal @ cb0e8bb  depth service :8130          optional: only hardware_real cameras without depth
-#   policy    <hf-user>/CaPtain-4B                   policy (vLLM) :8600          optional: coming soon; any OpenAI-compatible endpoint works
-#   policy-sft <hf-user>/CaPtain-4B-SFT              policy (vLLM) :8600          optional: coming soon
+#   policy    YijiaFan/CaPtain-4B                   policy (vLLM) :8600          optional; any OpenAI-compatible endpoint works
+#   policy-sft YijiaFan/CaPtain-4B-SFT              policy (vLLM) :8600          optional
 #   all       everything above
 #
 # Environment:
