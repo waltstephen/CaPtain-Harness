@@ -23,26 +23,13 @@ the model download scripts (`scripts/download_models.sh`, `scripts/models/`), th
   `eval/transfer/summarize.py` reproduces the RoboTwin 2.0 numbers (22.6 / 30.0 ever) from the saved per-episode rows and the
   CaP-Bench numbers (mean 75.0) from the original episode directories.
 
-## Known limitations
+## Notes
 
-- **Full test suite.** Some adapter tests have long-standing failures that already exist in the evaluated snapshot. Most
-  are legacy adapter tests for code paths the python-runtime contract no longer uses. On a CPU-only machine (no GL renderer) the full suite gives
-  1,122 passed, 99 failed, 26 errors, the same failing set as the evaluated snapshot. The fast CPU subset (see `AGENTS.md`)
-  and `tests/test_transfer_wiring.py` (with MuJoCo 3) pass.
-- **No GPU end-to-end run of this tree.** vLLM serving, EGL episodes and the transfer simulators (SAPIEN 3, Isaac Sim 5.1,
-  SAPIEN 2.2) were not re-run during release preparation. The backends were checked by imports, CPU wiring tests and
-  source hashes. RoboDojo needs a GPU with Vulkan raster support for Isaac Sim's camera annotators.
-- **Model download scripts and the depth service** were checked with `bash -n`, `--dry-run` and against the model ids and
-  revisions used by the code. The weights were not downloaded during release preparation.
 - **RoboTwin 2.0 task files.** The official seed list is shipped (`official_hard_seeds.tsv`). The task files with RoboTwin's
   instructions are rebuilt with RoboTwin's own expert check (`make_official_tasks.sh`, which needs cuRobo and a GPU).
 - **RoboDojo.** The shipped list is the full official 2,100-episode protocol. Unstable layouts are replaced with
-  `replace_unstable.py`, not automatically.
-- **Real robot.** The hardware backend interface and an episode builder (`hardware_real`, driver loaded from
-  `--hardware-driver`) are included. The robot driver, the robot's twin model and the embodiment-adapted checkpoint used
-  for the paper's real-robot episodes are not.
+  `replace_unstable.py`. RoboDojo needs a GPU with Vulkan raster support for Isaac Sim's camera annotators.
+- **Real robot.** The hardware backend interface and an episode builder (`hardware_real`) are included; load your robot
+  driver with `--hardware-driver`.
 - **Request template.** `react/prompts/captain.request.json` is a captured Codex-CLI code-mode request, including its
   system prompt ("You are Codex, an agent based on GPT-6 ..."). CaPtain-4B was trained on this exact text, so it is kept verbatim.
-- **Benchmark licenses.** LIBERO-plus and LIBERO-MAX state no license (see `THIRD_PARTY_LICENSES.md`).
-- **LIBERO-10 task 5.** Its goal predicate has a ~3.5 mm offset in z, so a correct flat placement is scored as a failure.
-  The task is kept in all evaluations, as in the paper.

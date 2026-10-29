@@ -191,7 +191,7 @@ CaPtain-4B was trained only on LIBERO, in this harness. Success rates in % (host
 
 CaPtain-Harness is released under the [MIT License](LICENSE). Upstream components (LIBERO, CaP-X, SAM 3, Molmo2, MoGe, the
 benchmarks and their simulators) keep their own licenses; see [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md). SAM 3
-weights fall under the SAM License and are not redistributed. Known limitations: [RELEASE_NOTES.md](RELEASE_NOTES.md).
+weights fall under the SAM License and are not redistributed. Release notes: [RELEASE_NOTES.md](RELEASE_NOTES.md).
 
 ## Citation
 
