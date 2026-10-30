@@ -19,7 +19,7 @@ the model download scripts (`scripts/download_models.sh`, `scripts/models/`), th
   None of these changes touch model-visible text. The driver and server tests, the import-boundary test and the
   transfer-wiring test pass.
 - **Transfer backends** (`adapters/{robotwin2,robodojo,simplerenv,capgym,hardware}`, `eval/transfer/`). Each backend is the
-  code of the evaluated snapshot for that benchmark, renamed; source hashes were checked against the run records.
+  code of the evaluated snapshot for that benchmark, renamed.
   `eval/transfer/summarize.py` reproduces the RoboTwin 2.0 numbers (22.6 / 30.0 ever) from the saved per-episode rows and the
   CaP-Bench numbers (mean 75.0) from the original episode directories.
 
