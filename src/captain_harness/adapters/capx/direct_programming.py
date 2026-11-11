@@ -8,6 +8,7 @@ from captain_harness.ports.capability import CapabilityManifest, CapabilitySpec,
 from captain_harness.ports.deadline import check_deadline, DeadlineExceeded
 from .motion_tools import pose_matrix, quaternion
 from .direct_geometry import detection_handles, selected_geometry
+from .motion_speed import MotionSpeedOptions
 
 PERCEPTION = frozenset({"observe", "segment", "select_detection", "point", "mark_point",
     "get_robot_state", "gripper_state", "track_target", "read_motion_trajectory"})
@@ -275,6 +276,9 @@ class DirectProgramming:
         self._measurement_receipts = {}
         self._issued_action_receipts = {}
         self._recent_motion_timing = []
+        # opt-in execution speed policy (tool_backend_options of ToolCapabilityBackend; default = release behaviour)
+        speed = getattr(tools, "_motion_speed", None)
+        self.motion_speed = speed if isinstance(speed, MotionSpeedOptions) else MotionSpeedOptions()
 
     def geometry(self):
         from captain_harness.adapters.robotics.public_gripper_geometry import envelope_in_eef
@@ -358,7 +362,10 @@ class DirectProgramming:
                         'command_time_feasible':True, 'physical_action_executed':False,
                         'timing_scope':'fixed jaw-command control cycles; jaw speed, achieved aperture, contact and object retention are not guaranteed'}
                 else:
-                    _, value = self._prepare_move(**arguments)
+                    executed, speed_record = self.motion_speed.resolve(arguments)
+                    _, value = self._prepare_move(**executed)
+                    if speed_record is not None:
+                        value = {**value, "motion_speed": speed_record}
                 return CapabilityResult.ok(value)
             except (ValueError, TypeError, KeyError) as exc:
                 return CapabilityResult.failed(FailureCategory.INVALID_ARGUMENT, str(exc))
@@ -384,6 +391,7 @@ class DirectProgramming:
                         "decision_guidance":"This selection/measurement failed. Resolve identity with current public evidence or state a separate direct-image hypothesis; do not count this as a passed geometry check."})
             return result
         start = self.robot.simulation_steps
+        speed_record = None
         action_id = uuid.uuid4().hex
         previous_attempt = (self.attempt_id, self.target_id, self._attempt_active)
         before = self._read_state()
@@ -408,7 +416,8 @@ class DirectProgramming:
                     lambda: self.robot.close_gripper() if args["gripper"] == "close" else self.robot.open_gripper(),
                     model=self.tools._motion_model(), stationary=True, gripper=True)
             else:
-                result = self._move(**args)
+                motion_args, speed_record = self.motion_speed.resolve(args)
+                result = self._move(**motion_args)
         except (ValueError, DeadlineExceeded) as exc:
             advanced = self.robot.simulation_steps > start
             result = CapabilityResult.failed(
@@ -490,8 +499,12 @@ class DirectProgramming:
             value["motion_progress"]=motion_progress(value)
             if result.executed:
                 self._recent_motion_timing.append({"action_id":action_id,
-                    "requested_max_speed_m_s":args.get("max_speed_m_s",.05),
-                    "requested_max_angular_speed_rad_s":args.get("max_angular_speed_rad_s",.5),
+                    "requested_max_speed_m_s":args.get("max_speed_m_s",self.motion_speed.default_max_speed_m_s),
+                    "requested_max_angular_speed_rad_s":args.get("max_angular_speed_rad_s",
+                        self.motion_speed.default_max_angular_speed_rad_s),
+                    **({"executed_max_speed_m_s":speed_record["executed_max_speed_m_s"],
+                        "executed_max_angular_speed_rad_s":speed_record["executed_max_angular_speed_rad_s"]}
+                       if speed_record is not None else {}),
                     "request_success":result.success,**value["motion_progress"]})
                 self._recent_motion_timing=self._recent_motion_timing[-6:]
         value["driver_success"] = result.success
@@ -511,6 +524,8 @@ class DirectProgramming:
             target_identity="policy_association_only" if self.target_id else "unknown",
             object_retention="not_verified", source="public_robot_measurements",
             gripper_command_fraction=self.robot._gripper_command_fraction)
+        if speed_record is not None:
+            value["motion_speed"] = speed_record
         value['related_failure_action_id'] = self._unresolved_failure_id
         if not result.success:
             self._unresolved_failure_id = action_id

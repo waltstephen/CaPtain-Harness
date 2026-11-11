@@ -342,10 +342,16 @@ def responses_to_chat_messages(instructions: str | None, items: Iterable[dict[st
     return messages
 
 
-def cap_images(messages: list[dict[str, Any]], max_images: int | None) -> int:
-    """Keep only the ``max_images`` most recent image parts (in place); returns how many were replaced."""
+def cap_images(messages: list[dict[str, Any]], max_images: int | None, chunk: int = 1) -> int:
+    """Keep only the ``max_images`` most recent image parts (in place); returns how many were replaced.
+
+    ``chunk`` > 1 drops the oldest images in multiples of ``chunk``, so the model sees between max_images - chunk + 1
+    and max_images images and the rendered prompt only changes at an early position every ``chunk`` new images
+    (append-only in between: the server's prefix cache keeps hitting). chunk=1 is the release behaviour."""
     if not max_images or max_images <= 0:
         return 0
+    if chunk < 1:
+        raise ValueError("image drop chunk must be >= 1")
     positions: list[tuple[int, int]] = []
     for m_index, message in enumerate(messages):
         content = message.get("content")
@@ -356,9 +362,10 @@ def cap_images(messages: list[dict[str, Any]], max_images: int | None) -> int:
     excess = len(positions) - max_images
     if excess <= 0:
         return 0
-    for m_index, p_index in positions[:excess]:
+    drop = min(len(positions), -(-excess // chunk) * chunk)
+    for m_index, p_index in positions[:drop]:
         messages[m_index]["content"][p_index] = {"type": "text", "text": IMAGE_OMITTED_TEXT.format(n=max_images)}
-    return excess
+    return drop
 
 
 # ----------------------------------------------------------------------------- reply
@@ -445,6 +452,8 @@ class ChatCompletionsClient:
     timeout_s: float = 900.0
     connect_timeout_s: float = 60.0
     event_sink: Callable[[dict[str, Any]], None] | None = None
+    image_drop_chunk: int = 1                       # cap_images chunk (1 = release behaviour)
+    thinking_token_budget: int | None = None        # vLLM request field: reasoning tokens before </think> is forced
 
     @property
     def url(self) -> str:
@@ -457,7 +466,7 @@ class ChatCompletionsClient:
         tools, custom = convert_tools(body, items, allow=None if self.all_tools else IMPLEMENTED_TOOLS)
         messages = responses_to_chat_messages(body.get("instructions"), items, history_reasoning=self.history_reasoning,
                                               keep_detail=self.keep_image_detail, hoist_tool_images=self.hoist_tool_images)
-        dropped = cap_images(messages, self.max_images)
+        dropped = cap_images(messages, self.max_images, self.image_drop_chunk)
         grayed = gray_out_images(messages) if os.environ.get("CAPTAIN_GRAY_IMAGES") == "1" else None
         request: dict[str, Any] = {"model": body.get("model"), "messages": messages, "stream": False}
         if tools:
@@ -474,6 +483,8 @@ class ChatCompletionsClient:
             request["top_p"] = self.top_p
         if self.enable_thinking is not None:
             request["chat_template_kwargs"] = {"enable_thinking": bool(self.enable_thinking)}
+        if self.thinking_token_budget is not None:
+            request["thinking_token_budget"] = int(self.thinking_token_budget)
         for key, value in self.extra_body.items():
             request.setdefault(key, value)
         stats = {"messages": len(messages), "images_dropped": dropped,

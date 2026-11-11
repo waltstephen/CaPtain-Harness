@@ -136,6 +136,24 @@ These hooks are used by the RL trainer of [CaPtain](https://github.com/waltsteph
 - `CAPTAIN_FAST_LOOP=1` / `CAPTAIN_LAZY_RENDER=1`: a faster MuJoCo control loop and on-demand camera rendering. Physics, tool responses and depth are bit-identical; RGB differs by ≤ 1 intensity level on < 0.05% of pixels, the same as renderer nondeterminism.
 - **Per-state visual variation** (light intensity and position, a small agentview camera jitter, material tints) is applied only for fresh-init states whose sidecar carries a `visual` list. It is used for the wide-layout RL start pool and never for official seeds.
 
+## Speed options (deployment, default-off)
+
+Latency options for deployments (e.g. a real arm served from consumer GPUs). Every default is the release
+behaviour; the paper protocol uses none of them. Tests: `tests/test_speed_options.py`.
+
+| Option | Where | Effect |
+|---|---|---|
+| `--server-poll-s S` / `--server-grace-s G` | driver (`scripts/react_episode.py` -> `server/episode_launch.py wait_for_server`) | env-server start-up polling; release 1.0 s / 0.5 s. With `G=0` a not yet fully written `server.json` is re-read on the next poll (fast setting: 0.02 / 0). |
+| `--image-drop-chunk N` | driver, chat API (`react/chat_llm.py cap_images`) | once `--max-images` is exceeded, drop the oldest images in multiples of N (same placeholder text). The model sees between max-images − N + 1 and max-images images and the prompt stays append-only for N new images in a row, so the server's prefix cache keeps hitting; release 1 rewrites an early position on every new image. |
+| `--thinking-token-budget N` | driver, chat API | sends the request field `thinking_token_budget` (vLLM forces `</think>` after N reasoning tokens); omitted when unset. Combine with `--max-output-tokens` and `--temperature`. |
+| `tool_backend_options`: `motion_speed_scale`, `default_max_speed_m_s`, `default_max_angular_speed_rad_s` | `adapters/capx/motion_speed.py` (coding-control `move_to`, `preview_motion`) | defaults replace the API defaults 0.05 m/s / 0.5 rad/s when the policy omits a limit; the requested (or default) limits are multiplied by the scale and capped at the API maxima 0.1 m/s / 1.0 rad/s, once per call. Receipts then carry `motion_speed` (requested and executed limits); the tool text is unchanged. Release: 1.0 / 0.05 / 0.5, nothing added. |
+| `backend_options["step_profile"]` | `adapters/hardware/backend.py` (`XR1ActionBackend`, per instance) | step-efficiency profile: `speed_scale` (per-tick advance above the API caps with ramp and stoppable deceleration), `slow_zone_m` (requested speed near a manipulation-mode endpoint), `settle_motion_m`, `settle_samples_needed`, `gripper_still_needed`, `gripper_near_target`, `velocity_samples`. RoboDojo passes its config's `control.step_profile`. Absent = release. |
+| `backend_options["gripper_settle_min_steps"]` | `adapters/libero/backend.py` | end an open/close once the measured jaw stopped moving, after at least N ticks (release: always the full gripper step count). |
+| `--cache-images N` | `services/sam3_server.py` (`SAM3_CACHE_IMAGES` in `start_perception.sh`) | LRU of the SAM3 image-encoder output for the N most recent images; responses are identical, `GET /cache_stats` reports hits. Release 0 = off. |
+
+Faster motion options change what the arm does physically: validate them on the twin (joint speed/acceleration
+against the servo limits, contact-guard trips) and get sign-off before a real arm.
+
 ## Tests
 
 ```bash

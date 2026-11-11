@@ -90,16 +90,28 @@ def start_server(root: Path, output_dir: Path, *, suite: str, task_id: int, seed
                             stdout=stdout, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, start_new_session=True)
 
 
-def wait_for_server(output_dir: Path, timeout_s: float, process: subprocess.Popen) -> dict:
+def wait_for_server(output_dir: Path, timeout_s: float, process: subprocess.Popen, *,
+                    poll_s: float = 1.0, grace_s: float = 0.5) -> dict:
+    """Wait for the env server's server.json.
+
+    Defaults (1.0 s polling, 0.5 s grace before reading the file) are the release behaviour. The fast profile
+    (react_episode.py --server-poll-s 0.02 --server-grace-s 0) polls tightly without the grace; the server writes
+    server.json non-atomically after it listens, so with grace_s=0 a file that does not parse yet is re-read on the
+    next poll."""
     output_dir = Path(output_dir)
     deadline = time.monotonic() + timeout_s
     while time.monotonic() < deadline:
         if (output_dir / "server.json").is_file():
-            time.sleep(0.5)
-            return json.loads((output_dir / "server.json").read_text(encoding="utf-8"))
+            if grace_s > 0:
+                time.sleep(grace_s)
+                return json.loads((output_dir / "server.json").read_text(encoding="utf-8"))
+            try:
+                return json.loads((output_dir / "server.json").read_text(encoding="utf-8"))
+            except json.JSONDecodeError:   # being written: poll again
+                pass
         if process.poll() is not None or (output_dir / "server_error.json").is_file():
             raise RuntimeError("env server exited during start-up; see server.stdout / server.log")
-        time.sleep(1.0)
+        time.sleep(poll_s)
     raise RuntimeError("env server did not start within %.0f s" % timeout_s)
 
 

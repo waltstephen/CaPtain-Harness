@@ -49,8 +49,9 @@ pinned submodule at `harness/`.
    `STUDENT_PYTHON`, `EGL_DEVICE`, `SIM_GPU`, `CAPTAIN_MODELS_DIR`, `CAPTAIN_BENCHMARKS_HOME`, `ROBOTWIN_ROOT`,
    `SIMPLERENV_ROOT`, `ROBODOJO_ROOT`, `CAPTAIN_DEPTH_URL`, `CAPTAIN_API_KEY`, `HF_TOKEN`, …). Benchmark configs use
    `${VAR}` placeholders rendered by `eval/transfer/render_config.py`. Never commit keys, tokens or weights.
-6. **RL hooks are default-off.** `--mark-requests`, live marks (`.live_request_marks`), `CAPTAIN_FAST_LOOP` and
-   `CAPTAIN_LAZY_RENDER` must not change behaviour when off.
+6. **RL hooks and speed options are default-off.** `--mark-requests`, live marks (`.live_request_marks`),
+   `CAPTAIN_FAST_LOOP`, `CAPTAIN_LAZY_RENDER` and the speed options of `docs/harness.md` must not change behaviour at
+   their defaults.
 7. **Backend options are opt-in.** Shared LIBERO / CaP-X modules carry backend-specific behaviour (for example the RoboDojo
    force model and IK-branch check) as attributes that are inactive unless that backend's builder sets them. Keep the
    LIBERO code path unchanged when adding options for another backend.

@@ -26,6 +26,7 @@ from captain_harness.ports.capability import CapabilityResult, FailureCategory
 
 from .artifacts import ArtifactHandleError, EpisodeArtifactRegistry
 from .grasp_feedback import grasp_style_evidence, summarize_grasp_choices
+from .motion_speed import MotionSpeedOptions
 from .motion_tools import MotionToolMixin
 from .pose_tools import PoseCandidateToolMixin
 from .selection_evidence import bind_selection_evidence, point_source_error
@@ -457,6 +458,9 @@ class ToolCapabilityBackend(PoseCandidateToolMixin, MotionToolMixin):
         motion_orientation_tolerance_rad: float = math.radians(5.0),
         v15_protocol: bool = False,
         motion_tools: bool = False,
+        motion_speed_scale: float = 1.0,
+        default_max_speed_m_s: float = 0.05,
+        default_max_angular_speed_rad_s: float = 0.5,
     ) -> None:
         self.robot = robot
         self.services = services
@@ -512,6 +516,9 @@ class ToolCapabilityBackend(PoseCandidateToolMixin, MotionToolMixin):
             motion_orientation_tolerance_rad
         )
         self._v15_protocol = bool(v15_protocol)
+        # opt-in execution speed of the coding-control move_to (motion_speed.py; defaults = release behaviour)
+        self._motion_speed = MotionSpeedOptions(motion_speed_scale, default_max_speed_m_s,
+                                                default_max_angular_speed_rad_s)
         self._ik_cfg: np.ndarray | None = None
         self._active_attachment_handle: str | None = None
         self._pending_attachment_handle: str | None = None
