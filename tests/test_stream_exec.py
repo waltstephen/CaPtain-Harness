@@ -15,7 +15,7 @@ import pytest
 from captain_harness.react.chat_llm import ChatCompletionsClient
 from captain_harness.react.python_repl import PythonRepl, python_tool, run_python_cell
 from captain_harness.react.sandbox import Sandbox
-from captain_harness.react.stream_exec import StatementCutter, StreamExec, partial_input
+from captain_harness.react.stream_exec import StatementCutter, StreamExec, chunk_code, partial_input
 from captain_harness.react.tools import ToolRouter
 from captain_harness.react.unified_exec import SessionManager, child_environment
 
@@ -50,6 +50,17 @@ CUTS = {
     "syntax error stops cutting": ("a = 1\nb = (\nc = 2\nd = 3\n", ["a = 1\n"]),
     "trailing partial line": ("a = 1\nb = foo(1,", ["a = 1\n"]),
     "last line is never cut": ("a = 1\nb = 2\n", ["a = 1\n"]),
+    # one-line cells (the SO-101 policy's usual style): cut after each top-level `;` as soon as it is decoded
+    "semicolons": ("obs=observe(); image(obs); print(obs['a']); open('N','w').write('x;y')",
+                   ["obs=observe();", " image(obs);", " print(obs['a']);"]),
+    "semicolon inside a string": ("s = 'a;b'; t = 1; u = 2", ["s = 'a;b';", " t = 1;"]),
+    "semicolon inside a comment": ("x = 1  # a; b\ny = 2\nz = 3\n", ["x = 1  # a; b\n", "y = 2\n"]),
+    "semicolons inside brackets": ("d = {'k': f(1); 2}\ne = 1\n", []),
+    "semicolons in a one-line suite": ("if cid: a=1; print(a); r=2\nz=1; w=2\nv=3\n", ["if cid: a=1; print(a); r=2\n", "z=1;", " w=2\n"]),
+    "semicolons in a one-line loop and def": ("for i in r: a; b\ndef f(): return 1; x = 2\ny = f(); z = 0",
+                                              ["for i in r: a; b\n", "def f(): return 1; x = 2\n", "y = f();"]),
+    "trailing semicolons": ("a = 1;\nb = 2;\n", ["a = 1;", "\nb = 2;"]),
+    "semicolon after a multi-line statement": ("x = f(1,\n  2); y = 3; z", ["x = f(1,\n  2);", " y = 3;"]),
 }
 
 
@@ -61,10 +72,13 @@ def test_cutter_cuts_only_complete_top_level_statements(name):
     assert "".join(expected) == text[:start]
     offset = 0
     for chunk, decoded in found:
+        compile(chunk_code(text, offset, offset + len(chunk)), "<t>", "exec")
         offset += len(chunk)
-        compile(chunk, "<t>", "exec")
+        if chunk.endswith(";"):
+            assert decoded == offset, "a top-level `;` ends its statement at once"
+            continue
         nxt = text[offset:].lstrip("\n")
-        assert decoded > offset and (decoded > len(text) - len(nxt)), "a cut needs the next line's first token"
+        assert decoded > offset and (decoded > len(text) - len(nxt)), "a cut at a line end needs the next line's first token"
 
 
 def test_cutter_waits_for_a_word_that_could_still_become_a_continuation_keyword():
@@ -137,6 +151,11 @@ CELLS = [
     "def boom():\n    raise RuntimeError('deep')\nprint('a')\nboom()\nprint('never')\n",
     "items = [\n    1,\n    2,\n]\ns = '''\nmulti\n'''\n# trailing comment\nlen(items)",
     "import sys\nprint('to stderr', file=sys.stderr)\nprint('to stdout')\nw = 5\n",
+    # one-line cells (`;`-separated), the SO-101 policy's usual style
+    "a = 2; print('a', a); b = a * 3; print(b); b",
+    "print('x'); y2 = 1 / 0; print('never')",
+    "if a: print('in'); c = 5\nprint(c); c + 1;",
+    "def g(v): return v + 1; h = g(1); print(h)",
 ]
 
 
@@ -158,6 +177,9 @@ def test_streamed_cells_render_exactly_like_whole_cell_execution(tmp_path):
         assert [c["cell"] for c in stream_router.python_cells] == [c["cell"] for c in release_router.python_cells]
         assert stream_router.python_cells[0]["stream_exec"]["early_statements"] == facts[0]["early_statements"]
         assert stream.summary()["cells"] == len(CELLS)
+        assert facts[8]["early_statements"] == 4 and facts[8]["statements"] == 5     # every `;` statement but the last
+        assert facts[9]["early_statements"] == facts[9]["statements"] == 2           # 1 / 0 stops the cell
+        assert facts[11]["statements"] == 0                                          # `;` inside a def suite never cuts
         assert "stream_exec" not in release_router.python_cells[0]
     finally:
         release_repl.close()

@@ -12,6 +12,13 @@ does not compile without its target). An indented next line, an open bracket, a 
 string never yields a cut (the prefix does not compile or the next line is indented). A partly decoded next line is
 waited for. An incomplete statement is never executed.
 
+A prefix also ends right after a top-level ``;`` (one-line cells such as ``r = f(); print(r); g()``) when it compiles,
+the ``;`` is a real token (not in a string or comment) and the statement before it is simple: in ``if c: a; b`` the
+``;`` belongs to the suite and never cuts. Nothing after a top-level ``;`` can extend the statement before it.
+
+``overlap_s`` (execution done before the response ended) is the wall time saved: after the response ends the rest of
+the cell runs back to back, so the cell ends ``overlap_s`` earlier than whole-cell execution would.
+
 Semantics changes against the release (recorded per cell):
 - a cell that does not compile as a whole runs nothing in the release; here the statements cut before the error have
   already run. The tool text still reports the release's SyntaxError (plus the output of what ran) and the cell's
@@ -24,14 +31,20 @@ Semantics changes against the release (recorded per cell):
 from __future__ import annotations
 
 import ast
+import io
 import queue
 import re
 import threading
 import time
+import tokenize
 from typing import Any, Callable
 
 CONTINUATION_KEYWORDS = frozenset({"else", "elif", "except", "finally"})
 _FIRST_WORD = re.compile(r"[A-Za-z_][A-Za-z_0-9]*")
+_CANDIDATE = re.compile(r"[\n;]")
+_COMPOUND = tuple(node for node in (getattr(ast, name, None) for name in (
+    "If", "For", "AsyncFor", "While", "With", "AsyncWith", "Try", "TryStar", "FunctionDef", "AsyncFunctionDef", "ClassDef",
+    "Match")) if node is not None)
 
 
 class StatementCutter:
@@ -39,7 +52,7 @@ class StatementCutter:
 
     def __init__(self) -> None:
         self.start = 0          # end of the last cut
-        self._settled = 0       # candidate line ends up to here were rejected for good
+        self._settled = 0       # candidate cut points up to here were rejected for good
 
     def cuts(self, text: str) -> list[tuple[int, int]]:
         """New complete chunks ``(start, end)`` of ``text`` (each extends the previous; ``text`` only ever grows)."""
@@ -52,17 +65,20 @@ class StatementCutter:
             self.start = self._settled = end
 
     def reset_lookahead(self) -> None:
-        """Forget rejected line ends after the last cut (the text after it was replaced)."""
+        """Forget rejected cut points after the last cut (the text after it was replaced)."""
         self._settled = self.start
 
     def _next_cut(self, text: str) -> int | None:
         position = max(self.start, self._settled)
         while True:
-            newline = text.find("\n", position)
-            if newline < 0:
+            match = _CANDIDATE.search(text, position)
+            if match is None:
                 return None
-            end = newline + 1
-            verdict = _cut_verdict(text, self.start, end)
+            end = match.end()
+            if match.group() == ";":
+                verdict = _semicolon_verdict(text, self.start, end)
+            else:
+                verdict = _cut_verdict(text, self.start, end)
             if verdict is None:
                 return None              # the next line has not shown enough yet
             if verdict:
@@ -70,9 +86,17 @@ class StatementCutter:
             self._settled = position = end
 
 
+def chunk_code(text: str, start: int, end: int) -> str:
+    """The source of ``text[start:end]``; a chunk that starts after a `;` mid-line loses that line's leading blanks."""
+    chunk = text[start:end]
+    return chunk.lstrip(" \t") if start > 0 and text[start - 1] != "\n" else chunk
+
+
 def _cut_verdict(text: str, start: int, end: int) -> bool | None:
-    """True: text[start:end] is complete top-level statements; False: never; None: undecided until more text arrives."""
-    if not _has_code(text[start:end]):
+    """Cut at a line end. True: text[start:end] is complete top-level statements; False: never; None: undecided until
+    more text arrives."""
+    code = chunk_code(text, start, end)
+    if not _has_code(code):
         return False                              # blank/comment-only: joins the next statement's chunk
     line_start = end
     while True:                                   # skip blank and comment-only lines (an `else:` may follow them)
@@ -93,11 +117,24 @@ def _cut_verdict(text: str, start: int, end: int) -> bool | None:
             return None                           # "el" could still become "else"
         if word.group() in CONTINUATION_KEYWORDS:
             return False
-    try:
-        compile(text[start:end], "<stream-exec>", "exec", dont_inherit=True)   # also rejects `return`/`break` outside
-    except (SyntaxError, ValueError):
+    return _compiles(code)                        # compile, not parse: also rejects `return`/`break` outside
+
+
+def _semicolon_verdict(text: str, start: int, end: int) -> bool:
+    """Cut after a `;` (one-line cells: ``a = f(); print(a); g(a)``): the chunk compiles, the `;` is a real token (not
+    in a comment or string) and it ends a top-level simple statement (not one inside ``if c: a; b``, whose suite
+    continues after the `;`). Nothing after a top-level `;` can extend the statement before it."""
+    code = chunk_code(text, start, end)
+    if not _has_code(code) or not _compiles(code):
         return False
-    return True
+    try:
+        tree = ast.parse(code)
+        tokens = [t for t in tokenize.generate_tokens(io.StringIO(code).readline)
+                  if t.type not in (tokenize.NEWLINE, tokenize.NL, tokenize.INDENT, tokenize.DEDENT, tokenize.ENDMARKER)]
+    except (SyntaxError, ValueError, tokenize.TokenError):
+        return False
+    return (bool(tokens) and tokens[-1].type == tokenize.OP and tokens[-1].string == ";"
+            and bool(tree.body) and not isinstance(tree.body[-1], _COMPOUND))
 
 
 _INPUT_KEY = re.compile(r'\s*\{\s*"input"\s*:\s*"')
@@ -191,7 +228,7 @@ class StreamingCell:
                 self.started = True
                 threading.Thread(target=self._execute, name="stream-exec", daemon=True).start()
                 self._queue.put(("begin", budget))
-            self._queue.put(("part", text[start:end], text[:start].count("\n"), text[:end]))
+            self._queue.put(("part", chunk_code(text, start, end), text[:start].count("\n"), text[:end]))
 
     def end_response(self) -> None:
         if self.response_end is None:
@@ -237,7 +274,7 @@ class StreamingCell:
         diverged = self.started and not source.startswith(executed)
         if self.started:
             if not diverged:
-                rest = source[self.cutter.start:]
+                rest = chunk_code(source, self.cutter.start, len(source))
                 if _has_code(rest) and _compiles(source):
                     self._queue.put(("part", rest, executed.count("\n"), source))
             self._queue.put(("close", executed if diverged else source))

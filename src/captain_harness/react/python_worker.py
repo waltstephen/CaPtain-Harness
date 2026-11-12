@@ -335,7 +335,8 @@ class Worker:
         except SystemExit as exc:
             state["status"], state["exception"] = "error", f"SystemExit: {exc.code!r} (the session keeps running)"
         except BaseException as exc:  # noqa: BLE001
-            state["status"], state["exception"] = "error", self._format_exception(exc)
+            # formatted at close: the traceback's source lines must be the whole cell's (this line may still be decoding)
+            state["status"], state["raised"] = "error", exc
         finally:
             signal.signal(signal.SIGALRM, previous)
         return {"status": state["status"]}
@@ -348,6 +349,10 @@ class Worker:
             return self.run(source, 600.0)
         filename = state["filename"]
         linecache.cache[filename] = (len(source), None, source.splitlines(True), filename)
+        raised = state.pop("raised", None)
+        if raised is not None:
+            state["exception"] = self._format_exception(raised)
+            del raised
         status, exception, display, syntax_error = state["status"], state["exception"], None, False
         try:
             self._compile(source, filename)
