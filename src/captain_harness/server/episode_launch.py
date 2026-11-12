@@ -117,11 +117,8 @@ def wait_for_server(output_dir: Path, timeout_s: float, process: subprocess.Pope
 
 def build_workspace(output_dir: Path, info: Mapping[str, Any], manifest_payload: Mapping[str, Any], *,
                     wall_time_s: float, max_actions: int, max_tool_calls: int, standards: bool = True,
-                    runtime: str = "shell", float_digits: int | None = None) -> Path:
-    """Write TASK.md, robot.py and .robot_server into <output_dir>/workspace (images/ already exists).
-
-    float_digits (speed option, default None = release): also write .robot_float_digits, so robot.py prints the numbers
-    of returned results with at most that many decimals (exact values kept for arithmetic and arguments)."""
+                    runtime: str = "shell") -> Path:
+    """Write TASK.md, robot.py and .robot_server into <output_dir>/workspace (images/ already exists)."""
     workspace = Path(output_dir) / "workspace"
     workspace.mkdir(exist_ok=True)
     (workspace / "images").mkdir(exist_ok=True)
@@ -129,8 +126,6 @@ def build_workspace(output_dir: Path, info: Mapping[str, Any], manifest_payload:
         json.dumps(manifest_payload["manifest"], indent=1, sort_keys=True), encoding="utf-8")
     shutil.copyfile(Path(__file__).with_name("robot.py"), workspace / "robot.py")
     (workspace / ".robot_server").write_text(str(info["url"]) + "\n", encoding="utf-8")
-    if float_digits is not None:
-        (workspace / ".robot_float_digits").write_text("%d\n" % float_digits, encoding="utf-8")
     (workspace / "TASK.md").write_text(
         task_markdown(info, manifest_payload, wall_time_s=wall_time_s, max_actions=max_actions,
                       max_tool_calls=max_tool_calls, standards=standards, runtime=runtime), encoding="utf-8")

@@ -308,36 +308,3 @@ def test_sam3_cache_encodes_each_image_once_and_returns_the_same_state():
     assert Processor.encodes == 5
     with pytest.raises(ValueError):
         _sam3_server().install_image_cache(Processor, 0)
-
-
-# --------------------------------------------------------------------------- short float printing in robot.py
-def _robot_module(tmp_path: Path, digits: int | None):
-    (tmp_path / "robot.py").write_text((ROOT / "src/captain_harness/server/robot.py").read_text())
-    (tmp_path / ".robot_server").write_text("http://127.0.0.1:9\n")   # unreachable: _install() only warns
-    if digits is not None:
-        (tmp_path / ".robot_float_digits").write_text(f"{digits}\n")
-    spec = importlib.util.spec_from_file_location(f"robot_{digits}", tmp_path / "robot.py")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
-
-
-RESULT = '{"value": {"center_m": [0.20183736412875067, -0.00023311848395751733, 1e-07, 0.0], "n": 3}}'
-
-
-def test_without_the_file_results_are_plain_floats(tmp_path):
-    robot = _robot_module(tmp_path, None)
-    value = json.loads(RESULT, parse_float=robot._PARSE_FLOAT)["value"]
-    assert type(value["center_m"][0]) is float
-    assert repr(value) == repr(json.loads(RESULT)["value"])
-
-
-def test_short_floats_print_rounded_but_keep_their_exact_value(tmp_path):
-    robot = _robot_module(tmp_path, 4)
-    value = json.loads(RESULT, parse_float=robot._PARSE_FLOAT)["value"]
-    x, tiny_neg, tiny, zero = value["center_m"]
-    assert repr(value) == "{'center_m': [0.2018, -0.0002, 1e-07, 0.0], 'n': 3}"
-    assert (str(x), f"{x}", "%s" % x, f"{x:.6f}") == ("0.2018", "0.2018", "0.2018", "0.201837")
-    assert x == 0.20183736412875067 and x * 2 == 0.20183736412875067 * 2
-    # sent back to the server (and anywhere else JSON goes) with full precision
-    assert json.loads(json.dumps(value["center_m"])) == [0.20183736412875067, -0.00023311848395751733, 1e-07, 0.0]

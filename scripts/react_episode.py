@@ -96,7 +96,6 @@ def main() -> int:
     p.add_argument("--max-images", type=int, default=16, help="chat: keep only the N most recent images in the replayed history (vLLM --limit-mm-per-prompt)")
     p.add_argument("--image-drop-chunk", type=int, default=1, help="chat: drop the oldest images in multiples of N once --max-images is exceeded, so the prompt stays append-only (prefix cache hits) for N new images in a row; 1 = drop one at a time (release)")
     p.add_argument("--thinking-token-budget", type=int, default=None, help="chat: request field thinking_token_budget (vLLM: reasoning tokens before </think> is forced); omitted when unset")
-    p.add_argument("--tool-float-digits", type=int, default=None, help="robot.py prints the numbers of returned results with at most N decimals (exact values kept for arithmetic and arguments): fewer prompt tokens per tool output; unset = full repr (release)")
     p.add_argument("--stream-exec", action="store_true", help="chat + python-runtime/v1: stream the completion and run the python cell's complete top-level statements while the rest is still decoding (release: off)")
     p.add_argument("--no-history-reasoning", action="store_true", help="chat: do not replay earlier reasoning_content (saves context; Qwen convention is to keep it within one agentic turn)")
     p.add_argument("--all-tools", action="store_true", help="chat: expose every tool of the template, not only the ones the driver implements")
@@ -135,8 +134,6 @@ def main() -> int:
         p.error("--image-drop-chunk must be >= 1")
     if args.thinking_token_budget is not None and (args.api != "chat" or args.thinking_token_budget < 1):
         p.error("--thinking-token-budget needs --api chat and a positive budget")
-    if args.tool_float_digits is not None and args.tool_float_digits < 0:
-        p.error("--tool-float-digits must be >= 0")
     if args.server_poll_s <= 0 or args.server_grace_s < 0:
         p.error("--server-poll-s must be > 0 and --server-grace-s >= 0")
     if args.stream_exec and (args.api != "chat" or args.runtime_tool_contract != "python-runtime/v1"):
@@ -185,7 +182,7 @@ def main() -> int:
     speed_options = {name: value for name, value, default in (
         ("image_drop_chunk", args.image_drop_chunk, 1), ("thinking_token_budget", args.thinking_token_budget, None),
         ("server_poll_s", args.server_poll_s, 1.0), ("server_grace_s", args.server_grace_s, 0.5),
-        ("stream_exec", args.stream_exec, False), ("tool_float_digits", args.tool_float_digits, None)) if value != default}
+        ("stream_exec", args.stream_exec, False)) if value != default}
     if speed_options:
         result["speed_options"] = speed_options
     termination = "infrastructure_error"
@@ -204,7 +201,7 @@ def main() -> int:
         url = info["url"]
         manifest = http_json(url + "/manifest")
         workspace = build_workspace(out, info, manifest, wall_time_s=args.wall_time, max_actions=args.max_actions, max_tool_calls=args.max_tool_calls,
-                                    runtime="python" if python_mode else "shell", float_digits=args.tool_float_digits)
+                                    runtime="python" if python_mode else "shell")
         result.update({"task": info["task"], "server_url": url, "server_pid": server.pid, "init_state_index": info.get("init_state_index")})
         if args.dry_run:
             http_json(url + "/finish", "POST", {"note": "dry run", "source": "driver"})

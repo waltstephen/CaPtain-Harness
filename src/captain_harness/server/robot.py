@@ -40,40 +40,6 @@ def _server_url():
     return url.rstrip("/")
 
 
-# Optional `.robot_float_digits` next to this module (one integer N, written by the driver's --tool-float-digits):
-# numbers in returned results print with at most N decimals, but keep their exact value for arithmetic and when they
-# are sent back to the server. Absent = plain floats (release behaviour).
-def _float_digits():
-    try:
-        with open(os.path.join(_HERE, ".robot_float_digits"), "r", encoding="utf-8") as stream:
-            return int(stream.read().strip())
-    except (OSError, ValueError):
-        return None
-
-
-class _ShortFloat(float):
-    """A float that prints rounded (repr/str/format with an empty spec) but keeps its exact value everywhere else."""
-    __slots__ = ()
-    digits = 4
-
-    def __repr__(self):
-        value = float(self)
-        if value != value or value in (float("inf"), float("-inf")):
-            return float.__repr__(value)
-        short = round(value, self.digits)
-        if short == 0.0 and value != 0.0:   # keep tiny non-zero numbers visible
-            return "%.2g" % value
-        return float.__repr__(short)
-
-    __str__ = __repr__
-
-
-_DIGITS = _float_digits()
-if _DIGITS is not None:
-    _ShortFloat.digits = _DIGITS
-_PARSE_FLOAT = _ShortFloat if _DIGITS is not None else float
-
-
 def _plain(value):
     """Array-likes (NumPy arrays and scalars, anything with tolist()/item()) are sent as plain JSON lists and numbers."""
     for method in ("tolist", "item"):
@@ -87,7 +53,7 @@ def _post(route, payload, timeout=1200.0):
     request = urllib.request.Request(_server_url() + route, data=data, headers={"Content-Type": "application/json"}, method="POST")
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
-            return json.loads(response.read().decode("utf-8"), parse_float=_PARSE_FLOAT)
+            return json.loads(response.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
         body = exc.read().decode("utf-8", "replace")
         raise RuntimeError("robot server HTTP %s: %s" % (exc.code, body[:500]))
@@ -95,7 +61,7 @@ def _post(route, payload, timeout=1200.0):
 
 def _get(route, timeout=60.0):
     with urllib.request.urlopen(_server_url() + route, timeout=timeout) as response:
-        return json.loads(response.read().decode("utf-8"), parse_float=_PARSE_FLOAT)
+        return json.loads(response.read().decode("utf-8"))
 
 
 _CELL = []
