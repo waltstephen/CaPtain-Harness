@@ -10,6 +10,7 @@ import base64
 import hashlib
 import io
 import json
+import threading
 import time
 import urllib.request
 from collections import OrderedDict
@@ -124,6 +125,7 @@ class MonoDepthSource:
         self.self_masks = {k: np.asarray(v, dtype=bool) for k, v in (self_masks or {}).items()}
         self.timeout_s = timeout_s
         self._cache: OrderedDict[str, np.ndarray] = OrderedDict()
+        self._lock = threading.Lock()   # the facade may estimate several cameras concurrently (cache + counters)
         self._cache_size = cache_size
         self.last_record: dict[str, Any] | None = None
         self.calls = 0
@@ -167,11 +169,12 @@ class MonoDepthSource:
         intr = np.asarray(intrinsics_3x3, dtype=np.float64).reshape(3, 3)
         ext = np.asarray(camera_to_base_4x4, dtype=np.float64).reshape(4, 4)
         key = hashlib.sha1(camera.encode() + rgb.tobytes() + intr.tobytes() + ext.tobytes()).hexdigest()
-        if key in self._cache:
-            self.cache_hits += 1
-            self.last_record = {"camera": camera, "cache_hit": True}
-            self._cache.move_to_end(key)
-            return self._cache[key]
+        with self._lock:
+            if key in self._cache:
+                self.cache_hits += 1
+                self.last_record = {"camera": camera, "cache_hit": True}
+                self._cache.move_to_end(key)
+                return self._cache[key]
         t0 = time.time()
         depth, meta = self._request(rgb, intr)
         if depth.shape != rgb.shape[:2]:
@@ -186,12 +189,13 @@ class MonoDepthSource:
             else:
                 scale = 1.0
             record["align"] = {"scale": scale, **info}
-        self.calls += 1
-        self.total_s += time.time() - t0
         record["latency_s"] = round(time.time() - t0, 4)
-        self._cache[key] = depth
-        while len(self._cache) > self._cache_size:
-            self._cache.popitem(last=False)
-        self.last_record = record
+        with self._lock:
+            self.calls += 1
+            self.total_s += time.time() - t0
+            self._cache[key] = depth
+            while len(self._cache) > self._cache_size:
+                self._cache.popitem(last=False)
+            self.last_record = record
         return depth
 
