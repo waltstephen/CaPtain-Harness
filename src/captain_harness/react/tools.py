@@ -111,6 +111,7 @@ class PythonCellResult:
     changed: list[dict[str, Any]]
     wall_s: float
     generation: int
+    stream_exec: dict[str, Any] | None = None   # stream-exec option only (react.stream_exec): early execution facts
 
 
 def view_image(path: str, workspace: Path, detail: str | None = None) -> list[dict[str, Any]] | str:
@@ -395,6 +396,8 @@ class ToolRouter:
                          "display": result.display, "exception": result.exception,
                          "images": [str(i.get("path") or "") for i in result.images], "wall_s": result.wall_s,
                          "cell": result.cell, "generation": result.generation}
+                if result.stream_exec is not None:
+                    value["stream_exec"] = result.stream_exec
             else:
                 value = {"exit_code": None, "session_id": None, "output": result if isinstance(result, str) else ""}
             self.audit.end_tool({**event, "command_id": command_id, "result": value, "error": error,
@@ -421,6 +424,8 @@ class ToolRouter:
         result = self._record_tool("python", dict(arguments), invoke)
         self.python_cells.append({"cell": result.cell, "status": result.status, "wall_s": result.wall_s,
                                   "generation": result.generation, "code_chars": len(str(arguments.get("code") or ""))})
+        if result.stream_exec is not None:
+            self.python_cells[-1]["stream_exec"] = result.stream_exec
         return result
 
     def close_tools(self) -> list[dict[str, Any]]:

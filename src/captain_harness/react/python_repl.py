@@ -86,6 +86,7 @@ class PythonRepl:
         self._replies: queue.Queue = queue.Queue()
         self._stderr_tail = b""
         self._lock = threading.Lock()
+        self._stream: dict[str, Any] | None = None    # the open streamed cell (begin_stream .. close_stream)
 
     # ------------------------------------------------------------ process
     def start(self) -> dict[str, Any]:
@@ -167,16 +168,9 @@ class PythonRepl:
         with self._lock:
             self.cells += 1
             cell_id = self.cells
-            if self.process is None or self.process.poll() is not None:
-                restarted = self.process is not None or self.generation > 0
-                self._kill()
-                try:
-                    self.start()
-                except ReplStartError as exc:
-                    return PythonCellResult(cell=cell_id, status="unavailable", output="", display=None, exception=str(exc),
-                                            images=[], epilogue=None, changed=[], wall_s=0.0, generation=self.generation)
-                if restarted:
-                    self.restarts += 1
+            unavailable = self._ensure_started(cell_id)
+            if unavailable is not None:
+                return unavailable
             started = time.monotonic()
             try:
                 self._send({"op": "run", "id": cell_id, "nonce": self._nonce, "code": code, "timeout_s": float(timeout_s)})
@@ -184,27 +178,102 @@ class PythonRepl:
             except (BrokenPipeError, OSError):
                 reply = None
             if reply is None:
-                generation = self.generation
-                self._kill()
+                return self._restarted(cell_id, started)
+            return self._result(cell_id, reply)
+
+    def _ensure_started(self, cell_id: int) -> PythonCellResult | None:
+        if self.process is None or self.process.poll() is not None:
+            restarted = self.process is not None or self.generation > 0
+            self._kill()
+            try:
+                self.start()
+            except ReplStartError as exc:
+                return PythonCellResult(cell=cell_id, status="unavailable", output="", display=None, exception=str(exc),
+                                        images=[], epilogue=None, changed=[], wall_s=0.0, generation=self.generation)
+            if restarted:
                 self.restarts += 1
-                error = None
+        return None
+
+    def _restarted(self, cell_id: int, started: float) -> PythonCellResult:
+        generation = self.generation
+        self._kill()
+        self.restarts += 1
+        error = None
+        try:
+            self.start()
+        except ReplStartError as exc:
+            error = str(exc)
+        return PythonCellResult(cell=cell_id, status="restarted", output="", display=None,
+                                exception=RESTART_TEXT + (f"\n{error}" if error else ""), images=[], epilogue=None,
+                                changed=[], wall_s=round(time.monotonic() - started, 3), generation=generation)
+
+    def _result(self, cell_id: int, reply: dict[str, Any]) -> PythonCellResult:
+        if reply.get("status") == "timeout":
+            self.timeouts += 1
+        output = str(reply.get("output") or "")
+        if reply.get("omitted_bytes"):
+            output += f"\n[{reply['omitted_bytes']} bytes of output omitted by the session]"
+        return PythonCellResult(cell=cell_id, status=str(reply.get("status") or "error"), output=output,
+                                display=reply.get("display"), exception=reply.get("exception"),
+                                images=[i for i in reply.get("images") or [] if isinstance(i, dict)],
+                                epilogue=reply.get("epilogue"), changed=[c for c in reply.get("changed") or [] if isinstance(c, dict)],
+                                wall_s=float(reply.get("wall_s") or 0.0), generation=self.generation)
+
+    # ------------------------------------------------------------ one cell, streamed (stream-exec, opt-in)
+    # begin_stream -> run_part* -> close_stream run one cell whose complete top-level statements arrive while the model is
+    # still decoding the rest. The session lock is held from begin_stream until close_stream returns; one thread drives it.
+    def begin_stream(self, *, timeout_s: float = DEFAULT_CELL_TIMEOUT_S) -> int | None:
+        """Open a streamed cell; returns its number, or None when the session is unavailable (nothing was counted)."""
+        self._lock.acquire()
+        if self.process is None or self.process.poll() is not None:
+            self._lock.release()
+            return None
+        self.cells += 1
+        cell_id = self.cells
+        self._stream = {"cell": cell_id, "started": time.monotonic(), "timeout_s": float(timeout_s), "dead": False}
+        try:
+            self._send({"op": "begin", "id": cell_id, "nonce": self._nonce, "timeout_s": float(timeout_s)})
+            ok = self._wait(lambda m: m.get("op") == "begin_result" and m.get("id") == cell_id, self.start_timeout_s) is not None
+        except (BrokenPipeError, OSError):
+            ok = False
+        self._stream["dead"] = not ok
+        return cell_id
+
+    def run_part(self, code: str, *, line_offset: int, source: str) -> str:
+        """Run complete top-level statements of the open cell; returns the cell's status so far (ok | error | timeout | dead)."""
+        stream = self._stream
+        if stream["dead"]:
+            return "dead"
+        remaining = stream["started"] + stream["timeout_s"] - time.monotonic()
+        try:
+            self._send({"op": "part", "id": stream["cell"], "nonce": self._nonce, "code": code, "line_offset": int(line_offset),
+                        "source": source})
+            reply = self._wait(lambda m: m.get("op") == "part_result" and m.get("id") == stream["cell"],
+                               max(remaining, 0.0) + self.kill_grace_s)
+        except (BrokenPipeError, OSError):
+            reply = None
+        if reply is None:
+            stream["dead"] = True
+            return "dead"
+        return str(reply.get("status") or "error")
+
+    def close_stream(self, source: str) -> tuple[PythonCellResult, dict[str, Any]]:
+        """End the open cell: the result of the whole ``source`` (formatted like ``run``) and the worker's stream facts."""
+        stream, self._stream = self._stream, None
+        try:
+            reply = None
+            if not stream["dead"]:
                 try:
-                    self.start()
-                except ReplStartError as exc:
-                    error = str(exc)
-                return PythonCellResult(cell=cell_id, status="restarted", output="", display=None,
-                                        exception=RESTART_TEXT + (f"\n{error}" if error else ""), images=[], epilogue=None,
-                                        changed=[], wall_s=round(time.monotonic() - started, 3), generation=generation)
-            if reply.get("status") == "timeout":
-                self.timeouts += 1
-            output = str(reply.get("output") or "")
-            if reply.get("omitted_bytes"):
-                output += f"\n[{reply['omitted_bytes']} bytes of output omitted by the session]"
-            return PythonCellResult(cell=cell_id, status=str(reply.get("status") or "error"), output=output,
-                                    display=reply.get("display"), exception=reply.get("exception"),
-                                    images=[i for i in reply.get("images") or [] if isinstance(i, dict)],
-                                    epilogue=reply.get("epilogue"), changed=[c for c in reply.get("changed") or [] if isinstance(c, dict)],
-                                    wall_s=float(reply.get("wall_s") or 0.0), generation=self.generation)
+                    self._send({"op": "close", "id": stream["cell"], "nonce": self._nonce, "source": source})
+                    reply = self._wait(lambda m: m.get("op") == "close_result" and m.get("id") == stream["cell"], self.kill_grace_s + 30.0)
+                except (BrokenPipeError, OSError):
+                    reply = None
+            if reply is None:
+                return self._restarted(stream["cell"], stream["started"]), {}
+            facts = {key: reply.get(key) for key in ("syntax_error", "parts", "ran", "run_error")}
+            return self._result(stream["cell"], reply), facts
+        finally:
+            self._lock.release()
 
     def close(self) -> dict[str, Any]:
         if not self.closed:
@@ -308,17 +377,38 @@ def render_cell(result: PythonCellResult, *, router: ToolRouter, workspace: Path
     return [{"type": "input_text", "text": "\n".join(line for line in lines if line is not None)}, *image_parts]
 
 
-def run_python_cell(source: str, *, router: ToolRouter, repl: PythonRepl, timeout_s: float = DEFAULT_CELL_TIMEOUT_S,
-                    output_limit_tokens: int = OUTPUT_TOKEN_LIMIT, spill_dir: Path | None = None,
-                    deadline_monotonic: float | None = None) -> list[dict[str, Any]]:
-    """Execute one `python` tool call (audited) and return its custom_tool_call_output parts."""
-    code, normalized = strip_fence(source)
+def cell_timeout(timeout_s: float, deadline_monotonic: float | None) -> float:
+    """A cell's time budget: the per-cell timeout, cut to the episode deadline minus a margin."""
     effective = float(timeout_s)
     if deadline_monotonic is not None:
         effective = min(effective, deadline_monotonic - time.monotonic() - DEADLINE_MARGIN_S)
+    return effective
+
+
+def run_python_cell(source: str, *, router: ToolRouter, repl: PythonRepl, timeout_s: float = DEFAULT_CELL_TIMEOUT_S,
+                    output_limit_tokens: int = OUTPUT_TOKEN_LIMIT, spill_dir: Path | None = None,
+                    deadline_monotonic: float | None = None, stream: Any = None) -> list[dict[str, Any]]:
+    """Execute one `python` tool call (audited) and return its custom_tool_call_output parts. ``stream``
+    (react.stream_exec.StreamExec, opt-in) holds the cell when it already started running while the call streamed."""
+    code, normalized = strip_fence(source)
+    effective = cell_timeout(timeout_s, deadline_monotonic)
     arguments = {"code": source, "timeout_s": round(max(effective, 0.0), 1), "normalized": normalized}
+    streamed = stream.take() if stream is not None else None
 
     def invoke() -> PythonCellResult:
+        facts = None
+        if streamed is not None:
+            early, facts = streamed.complete(source)
+            if early is not None and facts.get("diverged"):
+                facts["diverged_cell"] = early.cell     # ran the streamed prefix; the final input runs as a cell of its own
+            elif early is not None:
+                early.stream_exec = facts
+                return early
+        result = release()
+        result.stream_exec = facts
+        return result
+
+    def release() -> PythonCellResult:
         if not code.strip():
             return PythonCellResult(cell=repl.cells, status="rejected", output="", display=None,
                                     exception="python needs Python source code as its input", images=[], epilogue=None,
@@ -330,6 +420,8 @@ def run_python_cell(source: str, *, router: ToolRouter, repl: PythonRepl, timeou
         return repl.run(code, timeout_s=effective)
 
     result = router.record_python(arguments, invoke)
+    if streamed is not None and result.stream_exec is not None:
+        stream.record(result.cell, result.stream_exec)
     if result.status != "ok":
         router.record_outer_error(f"python cell {result.status}")
     return render_cell(result, router=router, workspace=router.workspace, output_limit_tokens=output_limit_tokens, spill_dir=spill_dir)
@@ -372,4 +464,4 @@ def python_runtime_contract(body: dict[str, Any], items: list[dict[str, Any]], v
 
 
 __all__ = ["DEFAULT_CELL_TIMEOUT_S", "PYTHON_RUNTIME_CONTRACT_VERSION", "PYTHON_TOOL_NAME", "PythonRepl", "ReplStartError",
-           "python_runtime_contract", "python_tool", "render_cell", "run_python_cell", "strip_fence"]
+           "cell_timeout", "python_runtime_contract", "python_tool", "render_cell", "run_python_cell", "strip_fence"]

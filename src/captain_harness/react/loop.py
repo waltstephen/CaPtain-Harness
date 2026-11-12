@@ -147,6 +147,11 @@ class Loop:
             self._next_item_id += 1
         return self._item_ids[key]
 
+    @property
+    def request_index(self) -> int:
+        """The request in flight (from just before it is sent until the next one)."""
+        return self._request_index
+
     def _record_view(self, index: int, estimated_tokens: int) -> None:
         self._request_index = index
         self._last_raw_estimate = self._fixed_raw + ctx.estimate_tokens(self.history)

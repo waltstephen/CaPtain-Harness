@@ -454,6 +454,7 @@ class ChatCompletionsClient:
     event_sink: Callable[[dict[str, Any]], None] | None = None
     image_drop_chunk: int = 1                       # cap_images chunk (1 = release behaviour)
     thinking_token_budget: int | None = None        # vLLM request field: reasoning tokens before </think> is forced
+    stream_exec: Any = None                         # react.stream_exec.StreamExec: stream the completion (None = release, stream False)
 
     @property
     def url(self) -> str:
@@ -485,6 +486,9 @@ class ChatCompletionsClient:
             request["chat_template_kwargs"] = {"enable_thinking": bool(self.enable_thinking)}
         if self.thinking_token_budget is not None:
             request["thinking_token_budget"] = int(self.thinking_token_budget)
+        if self.stream_exec is not None:
+            request["stream"] = True
+            request["stream_options"] = {"include_usage": True}
         for key, value in self.extra_body.items():
             request.setdefault(key, value)
         stats = {"messages": len(messages), "images_dropped": dropped,
@@ -496,6 +500,15 @@ class ChatCompletionsClient:
 
     # ------------------------------------------------------------------ public
     def respond(self, body: dict[str, Any]) -> ResponseResult:
+        if self.stream_exec is None:
+            return self._respond(body)
+        self.stream_exec.begin_response()
+        try:
+            return self._respond(body)
+        finally:
+            self.stream_exec.end_response()
+
+    def _respond(self, body: dict[str, Any]) -> ResponseResult:
         started = time.monotonic()
         request, custom, stats = self.build_request(body)
         if stats["images_dropped"]:
@@ -562,6 +575,8 @@ class ChatCompletionsClient:
                 conn.request("POST", path, body=payload, headers=self._headers())
                 conn.sock.settimeout(self.timeout_s)
                 response = conn.getresponse()
+                if request.get("stream") and response.status == 200:
+                    return self._read_stream(response)
                 text = response.read().decode("utf-8", errors="replace")
             except (socket.timeout, TimeoutError):
                 raise RetryableModelError("timeout waiting for the chat completion", kind="stream")
@@ -578,6 +593,70 @@ class ChatCompletionsClient:
                 conn.close()
             except Exception:
                 pass
+
+    def _read_stream(self, response: Any) -> dict[str, Any]:
+        """Assemble a streamed chat completion (server-sent events) into the non-streaming payload shape; the first tool
+        call's growing arguments go to ``stream_exec.tool_input`` as they arrive."""
+        payload: dict[str, Any] = {"id": None, "model": None, "usage": None}
+        reasoning: list[str] = []
+        content: list[str] = []
+        calls: dict[int, dict[str, Any]] = {}
+        finish_reason = None
+        complete = False
+        for raw in response:
+            line = raw.decode("utf-8", errors="replace").strip()
+            if not line.startswith("data:"):
+                continue
+            data = line[5:].strip()
+            if data == "[DONE]":
+                complete = True
+                break
+            try:
+                chunk = json.loads(data)
+            except json.JSONDecodeError as exc:
+                raise RetryableModelError(f"invalid JSON in the stream: {exc}", kind="stream")
+            if not isinstance(chunk, dict):
+                continue
+            if chunk.get("error"):
+                raise RetryableModelError(f"stream error: {json.dumps(chunk['error'])[:500]}", kind="stream")
+            payload["id"] = payload["id"] or chunk.get("id")
+            payload["model"] = payload["model"] or chunk.get("model")
+            if chunk.get("usage"):
+                payload["usage"] = chunk["usage"]
+            for choice in chunk.get("choices") or []:
+                if not isinstance(choice, dict) or choice.get("index", 0) != 0:
+                    continue
+                finish_reason = choice.get("finish_reason") or finish_reason
+                delta = choice.get("delta") if isinstance(choice.get("delta"), dict) else {}
+                piece = delta.get("reasoning_content") or delta.get("reasoning")
+                if isinstance(piece, str):
+                    reasoning.append(piece)
+                if isinstance(delta.get("content"), str):
+                    content.append(delta["content"])
+                for call_delta in delta.get("tool_calls") or []:
+                    if not isinstance(call_delta, dict):
+                        continue
+                    index = int(call_delta.get("index") or 0)
+                    call = calls.setdefault(index, {"id": None, "type": "function", "function": {"name": "", "arguments": ""}})
+                    call["id"] = call_delta.get("id") or call["id"]
+                    function = call_delta.get("function") if isinstance(call_delta.get("function"), dict) else {}
+                    if function.get("name"):
+                        call["function"]["name"] += str(function["name"])
+                    if isinstance(function.get("arguments"), str):
+                        call["function"]["arguments"] += function["arguments"]
+                    try:
+                        self.stream_exec.tool_input(index, call["function"]["name"], call["function"]["arguments"])
+                    except Exception as exc:  # noqa: BLE001 - early execution must never break the request
+                        self._emit({"event": "stream_exec_error", "error": f"{type(exc).__name__}: {exc}"[:300]})
+        if not complete:
+            raise RetryableModelError("the chat completion stream ended before [DONE]", kind="stream")
+        message: dict[str, Any] = {"role": "assistant", "content": "".join(content) if content else None}
+        if reasoning:
+            message["reasoning_content"] = "".join(reasoning)
+        if calls:
+            message["tool_calls"] = [calls[index] for index in sorted(calls)]
+        return {"id": payload["id"], "model": payload["model"], "usage": payload["usage"],
+                "choices": [{"index": 0, "message": message, "finish_reason": finish_reason}]}
 
     def _raise_for_status(self, status: int, text: str, headers: Any) -> None:
         code = ""

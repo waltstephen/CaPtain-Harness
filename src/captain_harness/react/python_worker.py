@@ -20,6 +20,7 @@ the namespace. The host kills and restarts the worker if a cell does not come ba
 """
 from __future__ import annotations
 
+import __future__
 import ast
 import builtins
 import inspect
@@ -72,6 +73,7 @@ class Worker:
         self.images: list[dict] = []
         self.namespace: dict = {"__name__": "__main__", "__builtins__": builtins}
         self.baseline: dict[str, int] = {}
+        self.stream: dict | None = None     # the open streamed cell (begin/part/close)
         sys.path[0] = os.getcwd()
 
     # ------------------------------------------------------------ protocol
@@ -96,6 +98,17 @@ class Worker:
                     self.cell = message["id"] - 1  # the host numbers cells across restarts
                 self.reply({"op": "result", "id": message.get("id"),
                             **self.run(str(message.get("code") or ""), float(message.get("timeout_s") or 600.0))})
+            elif op in ("begin", "part", "close") and message.get("nonce") == self.nonce:
+                # stream-exec (opt-in): one cell sent as consecutive complete top-level statements
+                if op == "begin":
+                    self.cell = int(message.get("id") or self.cell + 1) - 1
+                    self.begin(float(message.get("timeout_s") or 600.0))
+                    reply = {"status": "ok"}
+                elif op == "part":
+                    reply = self.part(str(message.get("code") or ""), int(message.get("line_offset") or 0), str(message.get("source") or ""))
+                else:
+                    reply = self.close(str(message.get("source") or ""))
+                self.reply({"op": op + "_result", "id": message.get("id"), **reply})
             elif op == "shutdown":
                 return
 
@@ -262,6 +275,95 @@ class Worker:
         return {"status": status, "output": output, "omitted_bytes": omitted, "display": display, "exception": exception,
                 "images": images, "epilogue": None if startup else self._epilogue(),
                 "changed": [] if startup else self._changed(before), "wall_s": round(wall, 3), "cell": self.cell}
+
+    # ------------------------------------------------------------ one cell, streamed (stream-exec)
+    def begin(self, timeout_s: float) -> None:
+        """Open a cell whose complete top-level statements arrive in order (``part``) and that ``close`` ends."""
+        self._inject()
+        self.images = []
+        self.cell += 1
+        before = self._names()
+        self._reset_capture()
+        started = time.monotonic()
+        self.stream = {"filename": f"<cell {self.cell}>", "before": before, "started": started, "timeout_s": timeout_s,
+                       "deadline": started + timeout_s, "status": "ok", "exception": None, "pending": None, "flags": 0, "parts": 0,
+                       "ran": 0}
+
+    def part(self, code: str, line_offset: int, source: str) -> dict:
+        """Run complete top-level statements that start at line ``line_offset + 1`` of the cell; ``source`` is the cell so far."""
+        state = getattr(self, "stream", None)
+        if state is None or state["status"] != "ok":
+            return {"status": "skipped"}
+        filename = state["filename"]
+        linecache.cache[filename] = (len(source), None, source.splitlines(True), filename)
+        state["pending"] = None          # an earlier trailing expression was not the cell's last statement
+        if "docstring" in state:         # ... and a lone leading string was the cell's docstring (whole-cell exec sets __doc__)
+            self.namespace["__doc__"] = state.pop("docstring")
+        state["parts"] += 1
+        timeout_s = state["timeout_s"]
+        previous = signal.signal(signal.SIGALRM, self._on_alarm)
+        signal.setitimer(signal.ITIMER_REAL, max(0.05, state["deadline"] - time.monotonic()))
+        try:
+            try:
+                tree = ast.parse(code, filename=filename, mode="exec")
+                ast.increment_lineno(tree, line_offset)
+                for node in tree.body:
+                    if isinstance(node, ast.ImportFrom) and node.module == "__future__":
+                        for alias in node.names:
+                            feature = getattr(__future__, alias.name, None)
+                            state["flags"] |= getattr(feature, "compiler_flag", 0)
+                if (state["parts"] > 1 and tree.body and isinstance(tree.body[0], ast.Expr) and isinstance(tree.body[0].value, ast.Constant)
+                        and isinstance(tree.body[0].value.value, str)):
+                    tree.body.insert(0, ast.copy_location(ast.Pass(), tree.body[0]))   # not the cell's docstring
+                last = None
+                if tree.body and isinstance(tree.body[-1], ast.Expr):
+                    last = ast.Expression(tree.body.pop().value)
+                body = compile(tree, filename, "exec", flags=state["flags"])
+                expression = compile(last, filename, "eval", flags=state["flags"]) if last is not None else None
+                state["ran"] += 1
+                exec(body, self.namespace, self.namespace)  # noqa: S102
+                if expression is not None:
+                    state["pending"] = (eval(expression, self.namespace, self.namespace),)  # noqa: S307
+                    if state["parts"] == 1 and not tree.body and isinstance(last.body, ast.Constant) and isinstance(last.body.value, str):
+                        state["docstring"] = last.body.value   # the cell's docstring if more statements follow
+            finally:
+                signal.setitimer(signal.ITIMER_REAL, 0)
+        except CellTimeout:
+            state["status"], state["exception"] = "timeout", f"CellTimeout: the cell was interrupted after {timeout_s:.0f} s (variables are kept)"
+        except KeyboardInterrupt:
+            state["status"], state["exception"] = "error", "KeyboardInterrupt"
+        except SystemExit as exc:
+            state["status"], state["exception"] = "error", f"SystemExit: {exc.code!r} (the session keeps running)"
+        except BaseException as exc:  # noqa: BLE001
+            state["status"], state["exception"] = "error", self._format_exception(exc)
+        finally:
+            signal.signal(signal.SIGALRM, previous)
+        return {"status": state["status"]}
+
+    def close(self, source: str) -> dict:
+        """End the streamed cell; the result has the shape of ``run`` for the whole ``source``. A cell that does not compile
+        as a whole reports its SyntaxError like ``run`` (``syntax_error`` tells the host that earlier parts did run)."""
+        state, self.stream = getattr(self, "stream", None), None
+        if state is None:
+            return self.run(source, 600.0)
+        filename = state["filename"]
+        linecache.cache[filename] = (len(source), None, source.splitlines(True), filename)
+        status, exception, display, syntax_error = state["status"], state["exception"], None, False
+        try:
+            self._compile(source, filename)
+        except BaseException as exc:  # noqa: BLE001 - the whole-cell compile error the release would report
+            status, exception, syntax_error = "error", self._format_exception(exc), True
+        if status == "ok" and state["pending"] is not None:
+            display = self._display(state["pending"][0])
+        state["pending"] = None
+        wall = time.monotonic() - state["started"]
+        output, omitted = self._read_capture()
+        self._inject()
+        images, self.images = self.images[:], []
+        return {"status": status, "output": output, "omitted_bytes": omitted, "display": display, "exception": exception,
+                "images": images, "epilogue": self._epilogue(), "changed": self._changed(state["before"]), "wall_s": round(wall, 3),
+                "cell": self.cell, "syntax_error": syntax_error, "parts": state["parts"], "ran": state["ran"],
+                "run_error": state["exception"]}
 
 
 def main() -> int:

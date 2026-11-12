@@ -29,11 +29,12 @@ from captain_harness.react.chat_llm import IMPLEMENTED_TOOLS, INCOMPLETE_NUDGE_T
 from captain_harness.react.code_mode import run_exec_script  # noqa: E402
 from captain_harness.react.llm import ResponsesClient  # noqa: E402
 from captain_harness.react.loop import Loop  # noqa: E402
-from captain_harness.react.python_repl import PythonRepl, ReplStartError, run_python_cell  # noqa: E402
+from captain_harness.react.python_repl import MIN_CELL_TIMEOUT_S, PythonRepl, ReplStartError, cell_timeout, run_python_cell  # noqa: E402
 from captain_harness.react.replay import ReplayClient, load_responses  # noqa: E402
 from captain_harness.react.toolchain_probe import probe_student_runtime  # noqa: E402
 from captain_harness.react.request import render_request  # noqa: E402
 from captain_harness.react.sandbox import Sandbox  # noqa: E402
+from captain_harness.react.stream_exec import StreamExec  # noqa: E402
 from captain_harness.react.tools import ToolRouter  # noqa: E402
 from captain_harness.react.unified_exec import SessionManager, child_environment  # noqa: E402
 from captain_harness.server import python_session  # noqa: E402
@@ -95,6 +96,7 @@ def main() -> int:
     p.add_argument("--max-images", type=int, default=16, help="chat: keep only the N most recent images in the replayed history (vLLM --limit-mm-per-prompt)")
     p.add_argument("--image-drop-chunk", type=int, default=1, help="chat: drop the oldest images in multiples of N once --max-images is exceeded, so the prompt stays append-only (prefix cache hits) for N new images in a row; 1 = drop one at a time (release)")
     p.add_argument("--thinking-token-budget", type=int, default=None, help="chat: request field thinking_token_budget (vLLM: reasoning tokens before </think> is forced); omitted when unset")
+    p.add_argument("--stream-exec", action="store_true", help="chat + python-runtime/v1: stream the completion and run the python cell's complete top-level statements while the rest is still decoding (release: off)")
     p.add_argument("--no-history-reasoning", action="store_true", help="chat: do not replay earlier reasoning_content (saves context; Qwen convention is to keep it within one agentic turn)")
     p.add_argument("--all-tools", action="store_true", help="chat: expose every tool of the template, not only the ones the driver implements")
     p.add_argument("--hoist-tool-images", action="store_true", help="chat: move images returned by tools into a user message after the tool messages (servers that only take text in tool messages)")
@@ -134,6 +136,8 @@ def main() -> int:
         p.error("--thinking-token-budget needs --api chat and a positive budget")
     if args.server_poll_s <= 0 or args.server_grace_s < 0:
         p.error("--server-poll-s must be > 0 and --server-grace-s >= 0")
+    if args.stream_exec and (args.api != "chat" or args.runtime_tool_contract != "python-runtime/v1"):
+        p.error("--stream-exec needs --api chat and --runtime-tool-contract python-runtime/v1")
 
     out = args.output_dir.resolve()
     if (out / "episode_result.json").is_file():
@@ -177,7 +181,8 @@ def main() -> int:
     # opt-in speed options (docs/harness.md "Speed options"): recorded only when they differ from the release defaults
     speed_options = {name: value for name, value, default in (
         ("image_drop_chunk", args.image_drop_chunk, 1), ("thinking_token_budget", args.thinking_token_budget, None),
-        ("server_poll_s", args.server_poll_s, 1.0), ("server_grace_s", args.server_grace_s, 0.5)) if value != default}
+        ("server_poll_s", args.server_poll_s, 1.0), ("server_grace_s", args.server_grace_s, 0.5),
+        ("stream_exec", args.stream_exec, False)) if value != default}
     if speed_options:
         result["speed_options"] = speed_options
     termination = "infrastructure_error"
@@ -235,6 +240,7 @@ def main() -> int:
             router = ToolRouter(sessions=sessions, workspace=workspace, apply_patch=lambda patch: apply_patch(patch, workspace))
             code_runner = None
             python_runner = None
+            stream = None
             deadline = t0 + args.wall_time + args.grace_s
             student_python = str(args.student_python) if args.student_python else None
             if python_mode:
@@ -264,9 +270,15 @@ def main() -> int:
                     raise
                 router.closers.append(repl.close)
                 spill_dir = (workspace / ".tool_output") if profile.spill_tool_output else None
+                if args.stream_exec:
+                    def early_budget():
+                        budget = cell_timeout(args.python_cell_timeout, deadline)
+                        return budget if budget >= MIN_CELL_TIMEOUT_S else None
+
+                    stream = StreamExec(lambda: repls["current"], early_budget)
                 python_runner = lambda source: run_python_cell(  # noqa: E731
                     source, router=router, repl=repls["current"], timeout_s=args.python_cell_timeout, output_limit_tokens=profile.truncation_tokens,
-                    spill_dir=spill_dir, deadline_monotonic=deadline)
+                    spill_dir=spill_dir, deadline_monotonic=deadline, stream=stream)
             elif profile.tool_mode == "code_mode":
                 code_runner = lambda source: run_exec_script(source, router=router, sandbox=sandbox, env=env, output_limit_tokens=profile.truncation_tokens)  # noqa: E731
             driver_dir = out / "driver"
@@ -284,7 +296,7 @@ def main() -> int:
                     enable_thinking=None if args.enable_thinking == "server" else (args.enable_thinking == "on"),
                     max_images=args.max_images, history_reasoning=not args.no_history_reasoning, all_tools=args.all_tools,
                     hoist_tool_images=args.hoist_tool_images, event_sink=sink,
-                    image_drop_chunk=args.image_drop_chunk, thinking_token_budget=args.thinking_token_budget)
+                    image_drop_chunk=args.image_drop_chunk, thinking_token_budget=args.thinking_token_budget, stream_exec=stream)
             else:
                 client = ResponsesClient(args.endpoint, auth=args.auth, event_sink=sink)
             if args.replay_prefix is not None:
@@ -310,7 +322,13 @@ def main() -> int:
                 token = info.get("driver_token")
                 if not token:
                     raise RuntimeError("--mark-requests needs an env server that issues a driver token")
-                before_tools = lambda index: http_json(url + "/mark", "POST", {"request_index": index, "token": token}, timeout=120)  # noqa: E731
+                marked: set[int] = set()
+
+                def before_tools(index: int) -> None:
+                    # once per request: with --stream-exec the request's first early statement marks it before its tools run
+                    if index not in marked:
+                        http_json(url + "/mark", "POST", {"request_index": index, "token": token}, timeout=120)
+                        marked.add(index)
             loop = Loop(client=client, body=body, history=items, router=router, profile=profile, output_dir=driver_dir,
                         prompt_cache_key=episode_id, code_mode_runner=code_runner, deadline_monotonic=deadline, max_requests=args.max_requests,
                         compaction=not args.no_compaction, workspace=workspace,
@@ -318,6 +336,10 @@ def main() -> int:
                         python_runner=python_runner, before_tools=before_tools,
                         tool_description=python_session.tool_description(args.python_cell_timeout) if python_mode else None,
                         incomplete_nudges=args.incomplete_nudges if args.api == "chat" else 0, incomplete_nudge_text=INCOMPLETE_NUDGE_TEXT)
+            if stream is not None:
+                stream.emit = loop.events.write
+                if before_tools is not None:
+                    stream.before_start = lambda: before_tools(loop.request_index)  # noqa: E731
             if args.handoff == "clean":
                 if args.replay_prefix is None or not python_mode or not info.get("driver_token"):
                     raise ValueError("--handoff clean needs --replay-prefix, python-runtime/v1 and an env server that issues a driver token")
@@ -369,6 +391,8 @@ def main() -> int:
                     holder["result"] = loop.run()
                 except Exception as exc:  # noqa: BLE001
                     holder["error"] = f"{type(exc).__name__}: {exc}"
+                if stream is not None:
+                    stream.flush()   # close a cell whose early statements ran but whose call the loop never ran
 
             thread = threading.Thread(target=run_loop, daemon=True)
             thread.start()
@@ -428,6 +452,8 @@ def main() -> int:
                 "stop_when_finished": loop.stop_when is not None,
             }
             usage = driver_block["usage"]
+            if stream is not None:
+                driver_block["stream_exec"] = stream.summary()
             if loop.tool_contract is not None:
                 driver_block["tool_contract"] = loop.tool_contract
             usage["total_tokens"] = int(usage.get("input_tokens", 0)) + int(usage.get("output_tokens", 0))
