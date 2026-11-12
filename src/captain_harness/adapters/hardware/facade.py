@@ -10,7 +10,6 @@ the twin's FK of the measured configuration.
 from __future__ import annotations
 
 import contextlib
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping, Protocol, Sequence
@@ -148,15 +147,12 @@ class XR1FacadeEnv:
                  parked_joints: Mapping[str, Sequence[float]] | None = None,
                  max_goal_step_m: float = 0.01, max_goal_step_rad: float = 0.08,
                  workspace_box: Mapping[str, Sequence[float]] | None = None,
-                 depth_estimators: Mapping[str, Any] | None = None, sensor_noise: Any = None,
-                 concurrent_depth: bool = False) -> None:
+                 depth_estimators: Mapping[str, Any] | None = None, sensor_noise: Any = None) -> None:
         self._driver = driver
         # optional sensor-noise model (.next_rng() / .rgb() / .depth()): applied to every frame the agent and the tools see
         self._sensor_noise = sensor_noise
         # cameras without a depth sensor: name -> MonoDepthSource-style callable (RGB + calibration only)
         self._depth_estimators = dict(depth_estimators or {})
-        # True: the cameras' depth estimates run concurrently (same results; opt-in speed option, default sequential)
-        self._concurrent_depth = bool(concurrent_depth)
         xml = Path(robot_xml_path).read_text()
         self.twin_model = mujoco.MjModel.from_xml_string(xml)
         self.twin_data = mujoco.MjData(self.twin_model)
@@ -230,26 +226,14 @@ class XR1FacadeEnv:
             for name, frame in list(self._frames.items()):
                 self._frames[name] = CameraFrame(rgb=self._sensor_noise.rgb(frame.rgb, noise_rng), depth_m=frame.depth_m,
                                                  intrinsics=frame.intrinsics, optical_in_robot_base=frame.optical_in_robot_base)
-        jobs = []
         for name, estimate in self._depth_estimators.items():
             frame = self._frames.get(name)
             if frame is None or frame.depth_m is not None:
                 continue
             extrinsics = (frame.optical_in_robot_base if frame.optical_in_robot_base is not None
                           else self.camera_link_pose(name) @ LINK_TO_OPTICAL)
-            jobs.append((name, estimate, frame, extrinsics))
-
-        def run(job):
-            name, estimate, frame, extrinsics = job
-            return estimate(camera=name, rgb=frame.rgb, raw_sim_depth=None,
-                            intrinsics_3x3=frame.intrinsics, camera_to_base_4x4=extrinsics)
-
-        if self._concurrent_depth and len(jobs) > 1:   # the cameras' estimates are independent requests
-            with ThreadPoolExecutor(max_workers=len(jobs)) as pool:
-                depths = list(pool.map(run, jobs))
-        else:
-            depths = [run(job) for job in jobs]
-        for (name, _, frame, _), depth in zip(jobs, depths):
+            depth = estimate(camera=name, rgb=frame.rgb, raw_sim_depth=None,
+                             intrinsics_3x3=frame.intrinsics, camera_to_base_4x4=extrinsics)
             self._frames[name] = CameraFrame(rgb=frame.rgb, depth_m=np.asarray(depth, np.float32),
                                              intrinsics=frame.intrinsics, optical_in_robot_base=frame.optical_in_robot_base)
         if noise_rng is not None:
