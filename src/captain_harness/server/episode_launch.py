@@ -14,7 +14,7 @@ import urllib.request
 from pathlib import Path
 from typing import Any, Mapping
 
-from captain_harness.server.task_markdown import task_markdown
+from captain_harness.server.task_markdown import COMPACT_PROFILE, api_files, task_markdown
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_PROMPT = ("Read TASK.md in this directory and complete the robot task it describes using robot.py. "
@@ -117,6 +117,10 @@ def build_workspace(output_dir: Path, info: Mapping[str, Any], manifest_payload:
     (workspace / "TASK.md").write_text(
         task_markdown(info, manifest_payload, wall_time_s=wall_time_s, max_actions=max_actions,
                       max_tool_calls=max_tool_calls, standards=standards, runtime=runtime), encoding="utf-8")
+    if (info.get("task_markdown_overrides") or {}).get("profile") == COMPACT_PROFILE:
+        for relative, text in api_files(manifest_payload).items():   # on-demand API documentation (compact profile)
+            (workspace / relative).parent.mkdir(parents=True, exist_ok=True)
+            (workspace / relative).write_text(text, encoding="utf-8")
     return workspace
 
 

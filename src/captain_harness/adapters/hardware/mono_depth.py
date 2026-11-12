@@ -41,17 +41,48 @@ def plane_depth(intrinsics_3x3: np.ndarray, camera_to_base_4x4: np.ndarray, heig
     return z.reshape(h, w)
 
 
+def plane_hit_xy(intrinsics_3x3: np.ndarray, camera_to_base_4x4: np.ndarray, height_m: float,
+                 shape: tuple[int, int]) -> tuple[np.ndarray, np.ndarray]:
+    """Robot-base (x, y) where each pixel's ray meets the plane z_base = height_m (NaN where not hit)."""
+    h, w = shape
+    k_inv = np.linalg.inv(np.asarray(intrinsics_3x3, dtype=np.float64).reshape(3, 3))
+    t = np.asarray(camera_to_base_4x4, dtype=np.float64).reshape(4, 4)
+    xs, ys = np.meshgrid(np.arange(w, dtype=np.float64), np.arange(h, dtype=np.float64))
+    dirs = t[:3, :3] @ (k_inv @ np.stack([xs.ravel(), ys.ravel(), np.ones(xs.size)]))
+    with np.errstate(divide="ignore", invalid="ignore"):
+        lam = (height_m - t[2, 3]) / dirs[2]
+    hit = np.isfinite(lam) & (lam > 0)
+    x = np.where(hit, t[0, 3] + lam * dirs[0], np.nan).reshape(h, w)
+    y = np.where(hit, t[1, 3] + lam * dirs[1], np.nan).reshape(h, w)
+    return x, y
+
+
+def footprint_mask(intrinsics_3x3: np.ndarray, camera_to_base_4x4: np.ndarray, height_m: float, shape: tuple[int, int],
+                   footprint: Mapping[str, Any]) -> np.ndarray:
+    """Pixels whose ray meets the support plane inside the calibrated table rectangle footprint = {"x": [min, max],
+    "y": [min, max]} (robot_base metres)."""
+    x, y = plane_hit_xy(intrinsics_3x3, camera_to_base_4x4, height_m, shape)
+    (x0, x1), (y0, y1) = footprint["x"], footprint["y"]
+    with np.errstate(invalid="ignore"):
+        return (x >= x0) & (x <= x1) & (y >= y0) & (y <= y1)
+
+
 def fit_plane_scale(mono: np.ndarray, plane_z: np.ndarray, *, tolerance: float = 0.06, min_pixels: int = 2000,
-                    exclude: np.ndarray | None = None, min_cluster_fraction: float = 0.3) -> tuple[float, dict[str, Any]]:
+                    exclude: np.ndarray | None = None, min_cluster_fraction: float = 0.3,
+                    start: str = "farthest") -> tuple[float, dict[str, Any]]:
     """Robust single scale s with s*mono ~= plane depth on pixels that look like the support plane.
 
     Pixels are support-plane candidates when the plane is hit and the ratio plane/mono agrees with the
     current scale estimate within ``tolerance`` (relative); objects standing on the table are in front of
     the plane (ratio > s) and are rejected. ``exclude`` masks pixels that are never support plane (the robot's
-    own gripper in the wrist camera). Start: among log-ratio clusters holding at least ``min_cluster_fraction``
-    of the densest cluster's mass, the one with the *smallest* ratio, i.e. the farthest large surface -- the
-    support plane lies behind everything standing on it.
+    own gripper in the wrist camera). Start (``start="farthest"``): among log-ratio clusters holding at least
+    ``min_cluster_fraction`` of the densest cluster's mass, the one with the *smallest* ratio, i.e. the farthest large
+    surface -- the support plane lies behind everything standing on it. That rule locks onto a floor or wall seen past
+    the table edge; when the candidates are already restricted to the calibrated table footprint, ``start="densest"``
+    starts from the densest cluster instead.
     """
+    if start not in ("farthest", "densest"):
+        raise ValueError(f"unknown start {start!r}")
     valid = np.isfinite(mono) & (mono > 0) & np.isfinite(plane_z) & (plane_z > 0)
     if exclude is not None:
         valid &= ~np.asarray(exclude, dtype=bool).reshape(valid.shape)
@@ -67,13 +98,16 @@ def fit_plane_scale(mono: np.ndarray, plane_z: np.ndarray, *, tolerance: float =
     mass = np.convolve(hist, np.ones(2 * width + 1), mode="same")
     peaks = [i for i in range(len(mass)) if mass[i] > 0 and mass[i] >= mass[max(0, i - width):i + width + 1].max()]
     strong = [i for i in peaks if mass[i] >= min_cluster_fraction * mass.max()]
-    start = min(strong) if strong else int(np.argmax(mass))
+    if start == "densest":
+        first = int(np.argmax(mass))
+    else:
+        first = min(strong) if strong else int(np.argmax(mass))
     # A sharp cluster gives a flat-topped box of equal mass; move to the middle of that plateau, then start from
     # the median log-ratio inside the window (the plateau edge alone can sit a full tolerance off the cluster).
-    end = start
-    while end + 1 < len(mass) and mass[end + 1] == mass[start]:
+    end = first
+    while end + 1 < len(mass) and mass[end + 1] == mass[first]:
         end += 1
-    centre = edges[(start + end) // 2] + 0.005
+    centre = edges[(first + end) // 2] + 0.005
     near = np.abs(log_ratio - centre) <= np.log1p(tolerance)
     s = float(np.exp(np.median(log_ratio[near]))) if near.any() else float(np.exp(centre))
     inliers = np.zeros_like(ratio, dtype=bool)
@@ -98,6 +132,11 @@ class MonoDepthSource:
       plane  rescale by one robust scalar per frame so the dominant support plane lands at a known height
              ``support_plane_z_m`` in the robot-base frame. Reads: RGB, intrinsics, camera extrinsics and that one
              height (a one-time scene calibration, e.g. measured once by touching the table).
+
+    table_footprint_m (optional, plane alignment only): the calibrated table rectangle {"x": [min, max], "y": [min, max]}
+    in robot_base metres. Only pixels whose ray meets the support plane inside it may set the scale, and the fit starts
+    from the densest cluster, so a floor or wall seen past the table edge can no longer win. The real arm gets the
+    rectangle from the same one-time calibration as the plane height (a few table points touched or measured).
     """
 
     needs_sim_depth = False
@@ -110,6 +149,7 @@ class MonoDepthSource:
         align: str = "none",
         support_plane_z_m: float | None = None,
         self_masks: Mapping[str, np.ndarray] | None = None,
+        table_footprint_m: Mapping[str, Any] | None = None,
         timeout_s: float = 60.0,
         cache_size: int = 16,
     ) -> None:
@@ -122,6 +162,12 @@ class MonoDepthSource:
         self.align = align
         self.support_plane_z_m = support_plane_z_m
         self.self_masks = {k: np.asarray(v, dtype=bool) for k, v in (self_masks or {}).items()}
+        if table_footprint_m is not None:
+            fx, fy = (tuple(float(v) for v in table_footprint_m[k]) for k in ("x", "y"))
+            if len(fx) != 2 or len(fy) != 2 or fx[0] >= fx[1] or fy[0] >= fy[1]:
+                raise ValueError(f"table_footprint_m needs x/y [min, max] ranges, got {table_footprint_m!r}")
+            table_footprint_m = {"x": list(fx), "y": list(fy)}
+        self.table_footprint_m = table_footprint_m
         self.timeout_s = timeout_s
         self._cache: OrderedDict[str, np.ndarray] = OrderedDict()
         self._cache_size = cache_size
@@ -141,6 +187,9 @@ class MonoDepthSource:
             if self.self_masks:
                 inputs.append("fixed robot self-occlusion mask (gripper region) excluded from the fit: "
                               + ", ".join(sorted(self.self_masks)))
+            if self.table_footprint_m:
+                inputs.append(f"calibrated table footprint {self.table_footprint_m} in robot base frame (scale fit only "
+                              "on table pixels)")
         return {"depth_source": "mono", "service": self.url, "model": self.model or "server default",
                 "align": self.align, "inputs": inputs, "simulator_depth_used": False}
 
@@ -180,7 +229,15 @@ class MonoDepthSource:
         if self.align == "plane":
             plane = plane_depth(intr, ext, float(self.support_plane_z_m), depth.shape)
             mask = self.self_masks.get(camera)
-            scale, info = fit_plane_scale(depth, plane, exclude=mask if mask is not None and mask.shape == depth.shape else None)
+            exclude = mask if mask is not None and mask.shape == depth.shape else None
+            start = "farthest"
+            if self.table_footprint_m:
+                outside = ~footprint_mask(intr, ext, float(self.support_plane_z_m), depth.shape, self.table_footprint_m)
+                exclude = outside if exclude is None else (outside | exclude)
+                start = "densest"
+            scale, info = fit_plane_scale(depth, plane, exclude=exclude, start=start)
+            if self.table_footprint_m:
+                info = {**info, "footprint": True}
             if info["status"] == "ok" and 0.05 < scale < 20.0:
                 depth = depth * scale
             else:

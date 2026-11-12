@@ -148,6 +148,103 @@ PYTHON_ACT = """- You act through the `python` tool: a persistent Python 3 sessi
 - There is no shell: use Python for files (e.g. `open("NOTES.md", "w")`)."""
 
 
+# Compact prompt profile (task_markdown_overrides["profile"]). Opt-in per robot; without it TASK.md is byte-identical to
+# the evaluated protocol. compact_v1 keeps the robot intro and the task, shortens "How to act", accepts a full standards
+# replacement (overrides["standards"]) and lists the capability API as signatures plus one-line summaries; the complete
+# rendered interface goes to workspace files (API.md: general rules; api/<name>.md: one capability) that the agent reads
+# on demand. env_server additionally summarises large capability results for this profile (compact_values.py).
+COMPACT_PROFILE = "compact_v1"
+PROFILES = (COMPACT_PROFILE,)
+
+COMPACT_PYTHON_ACT = """- You act through the `python` tool: a persistent Python 3 session in this directory. `robot` is imported and
+  every capability is also a bare function (`observe()`, `move_to(...)`, ...). Variables, functions and imports persist.
+  A call can be a whole program; compute coordinates from variables, do not retype numbers from earlier output.
+- Every capability returns a dict `{success, executed, failure_category, message, value, diagnostics, budget}` and
+  never raises: check `success` in code. After each call you see what it printed, its final expression and one receipt
+  line per robot call.
+- Print only the fields you need. Large results are summarised (long lists and texts shortened) and carry
+  `details_file`, a JSON file in `values/` with the complete result: `json.load(open(r["details_file"]))`.
+- `observe()` captures the head (`agentview`) and wrist (`robot0_eye_in_hand`) RGB-D frames: `value["images"]` lists
+  512x512 PNG files in `images/`; look at them with `image(path)` (at most 4 per call). `value` also holds camera
+  intrinsics/extrinsics, depth handles and the measured robot state (end-effector pose, `gripper_open_fraction`, ...).
+- There is no shell: use Python for files."""
+
+
+def split_interface(interface: str) -> tuple[str, dict[str, str]]:
+    """Rendered interface -> (general `# ` comment text, {capability name: its full `def` block})."""
+    general: list[str] = []
+    blocks: dict[str, list[str]] = {}
+    name = None
+    for line in interface.splitlines():
+        match = re.match(r"^def (\w+)\(", line)
+        if match:
+            name = match.group(1)
+            blocks[name] = [line]
+        elif line.startswith("#") or name is None:
+            general.append(line)
+        else:
+            blocks[name].append(line)
+    return "\n".join(general).strip(), {k: "\n".join(v).rstrip() for k, v in blocks.items()}
+
+
+def _summary_line(block: str, width: int = 150) -> str:
+    """`def name(args) -> dict  # first sentence of the docstring`."""
+    lines = block.splitlines()
+    signature = lines[0].rstrip().rstrip(":")
+    doc = next((l.strip().lstrip('"').strip() for l in lines[1:] if l.strip().strip('"')), "")
+    first = re.split(r"(?<=[.!?])\s", doc, maxsplit=1)[0]
+    if len(first) > width:
+        first = first[:width - 3].rsplit(" ", 1)[0] + "..."
+    return f"{signature}  # {first}" if first else signature
+
+
+def api_files(manifest: Mapping[str, object]) -> dict[str, str]:
+    """Workspace documentation of the compact profile: API.md (general rules + index) and api/<name>.md (one capability,
+    the full rendered signature, description, frames and constraints)."""
+    general, blocks = split_interface(rewrite_interface(str(manifest["python_interface"])))
+    index = "\n".join(f"- `api/{name}.md`: {_summary_line(block).split('  # ', 1)[-1]}" for name, block in blocks.items())
+    files = {"API.md": f"# Capability API: general rules\n\n```python\n{general}\n```\n\n## One file per capability\n\n{index}\n"}
+    for name, block in blocks.items():
+        files[f"api/{name}.md"] = f"# {name}\n\n```python\n{block}\n```\n"
+    return files
+
+
+def _compact_task_markdown(info, manifest, *, intro: str, images: str, standards_block: str, wall_time_s: float,
+                           max_actions: int, max_tool_calls: int) -> str:
+    _general, blocks = split_interface(rewrite_interface(str(manifest["python_interface"])))
+    api = "\n".join(_summary_line(block) for block in blocks.values())
+    return f"""# Robot manipulation task
+
+{intro}
+
+**Task: {info['task']}**
+
+## How to act
+{COMPACT_PYTHON_ACT}
+- Initial camera images (taken before any action):
+{images}
+- Coordinates are meters in the `robot_base` frame, quaternions are `wxyz`.
+- `robot.status()` returns the remaining budgets; `robot.history(start, end, limit)` the records of your past calls.
+- Long conversations are compacted: afterwards you keep only the task files, the images, `NOTES.md`, `robot.history()`
+  and your latest turns. Keep a short STATUS block at the TOP of `NOTES.md` and rewrite it (do not append) after every
+  step: goal, the ids / poses / numbers you rely on, what is done, what failed, the next step.
+- `robot.finish()` ends the episode: the final scene is scored by a hidden success predicate and you get no verdict.
+  Tool-call success is not task success.
+- Budgets: {max_actions} physical actions (`move_to`, `hold`, `recover`, `release`; rejected requests count too),
+  {max_tool_calls} perception/compute calls and {wall_time_s / 60:.0f} minutes of wall-clock time (`budget` in every result).
+- Only the API is available: do not modify `robot.py` or reach outside this directory.
+{standards_block}
+## Capability API (call them as `robot.<name>(...)` or bare)
+
+Full documentation of one capability: `print(open("api/<name>.md").read())`; general rules for motion, contact,
+perception and recovery: `print(open("API.md").read())`.
+
+```python
+{api}
+```
+"""
+
+
 def task_markdown(info: Mapping[str, object], manifest: Mapping[str, object], *, wall_time_s: float,
                   max_actions: int, max_tool_calls: int, standards: bool = True, runtime: str = "shell") -> str:
     if runtime not in ("shell", "python"):
@@ -157,7 +254,14 @@ def task_markdown(info: Mapping[str, object], manifest: Mapping[str, object], *,
         f"- `{Path(i['path']).relative_to(Path(i['path']).parents[1])}` ({i['role']} camera `{i['camera']}`)"
         for i in info["initial_images"])
     overrides = dict(info.get("task_markdown_overrides") or {})
-    standards_text = STANDARDS
+    profile = overrides.get("profile")
+    if profile is not None and profile not in PROFILES:
+        raise ValueError(f"unknown task_markdown profile {profile!r}")
+    if profile is not None and runtime != "python":
+        raise ValueError(f"task_markdown profile {profile!r} needs the python runtime")
+    if overrides.get("standards") is not None and profile is None:
+        raise ValueError("a full standards replacement needs a task_markdown profile")
+    standards_text = STANDARDS if overrides.get("standards") is None else str(overrides["standards"]).rstrip() + "\n"
     for old, new in (overrides.get("standards_replace") or {}).items():
         if old not in standards_text:
             raise ValueError(f"standards override target not found: {old[:60]!r}")
@@ -169,6 +273,9 @@ def task_markdown(info: Mapping[str, object], manifest: Mapping[str, object], *,
     if intro is None:  # CaP-Bench (capgym_* suites) names its benchmark; everything else is LIBERO's text
         benchmark = "CaP-Gym Robosuite benchmark" if str(info.get("suite") or "").startswith("capgym_") else "LIBERO benchmark"
         intro = INTRO.replace("LIBERO benchmark", benchmark)
+    if profile == COMPACT_PROFILE:
+        return _compact_task_markdown(info, manifest, intro=intro, images=images, standards_block=standards_block,
+                                      wall_time_s=wall_time_s, max_actions=max_actions, max_tool_calls=max_tool_calls)
     act = PYTHON_ACT if runtime == "python" else SHELL_ACT
     return f"""# Robot manipulation task
 
@@ -206,4 +313,5 @@ def task_markdown(info: Mapping[str, object], manifest: Mapping[str, object], *,
 """
 
 
-__all__ = ["PROTOCOL_SENTENCE", "PYTHON_ACT", "SHELL_ACT", "STANDARDS", "rewrite_interface", "strip_protocol", "task_markdown"]
+__all__ = ["COMPACT_PROFILE", "COMPACT_PYTHON_ACT", "PROFILES", "PROTOCOL_SENTENCE", "PYTHON_ACT", "SHELL_ACT", "STANDARDS",
+           "api_files", "rewrite_interface", "split_interface", "strip_protocol", "task_markdown"]
