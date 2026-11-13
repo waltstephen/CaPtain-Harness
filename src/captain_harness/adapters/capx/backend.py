@@ -461,9 +461,14 @@ class ToolCapabilityBackend(PoseCandidateToolMixin, MotionToolMixin):
         motion_speed_scale: float = 1.0,
         default_max_speed_m_s: float = 0.05,
         default_max_angular_speed_rad_s: float = 0.5,
+        concurrent_label_check: bool = False,
     ) -> None:
         self.robot = robot
         self.services = services
+        # opt-in speed option: mark_point's label check (a `point` request) runs while the point-guided segmentation
+        # and the geometry are computed instead of after them; same requests, same result (default = release order)
+        self._concurrent_label_check = bool(concurrent_label_check)
+        self._pending_service_calls: list = []
         self.registry = registry
         self._tcp_offset_local_m = _finite_vector(
             tcp_offset_local_m,
@@ -586,6 +591,7 @@ class ToolCapabilityBackend(PoseCandidateToolMixin, MotionToolMixin):
             result = CapabilityResult.invalid_argument(f"{type(exc).__name__}: {exc}")
         except Exception as exc:
             result = CapabilityResult.failed(FailureCategory.TOOL_ERROR, f"{type(exc).__name__}: {exc}")
+        self._drain_pending_service_calls()   # requests started concurrently belong to this call's receipts
         if not isinstance(result, CapabilityResult):
             return result  # The generic validated broker owns malformed returns.
         steps_after = getattr(self.robot, 'simulation_steps', None)
@@ -610,6 +616,21 @@ class ToolCapabilityBackend(PoseCandidateToolMixin, MotionToolMixin):
         if diagnostics:
             result = replace(result, diagnostics=diagnostics)
         return retain_deadline_status(result, current_deadline())
+
+    def _start_service_call(self, function, *args):
+        """Run a service request on a worker thread (with this call's deadline context); returns a future."""
+        import contextvars
+        future = _service_pool().submit(contextvars.copy_context().run, function, *args)
+        self._pending_service_calls.append(future)
+        return future
+
+    def _drain_pending_service_calls(self) -> None:
+        pending, self._pending_service_calls = self._pending_service_calls, []
+        for future in pending:
+            try:
+                future.result()
+            except Exception:  # noqa: BLE001 - the capability that started it already consumed or skipped its result
+                pass
 
     def get_observation(self) -> CapabilityResult[dict[str, object]]:
         result = self.robot.get_observation_data()
@@ -1460,6 +1481,8 @@ class ToolCapabilityBackend(PoseCandidateToolMixin, MotionToolMixin):
         normalized_label = (
             " ".join(label.split()) if isinstance(label, str) and label.strip() else None
         )
+        label_point = (self._start_service_call(self.services.point, camera.image, normalized_label)
+                       if self._concurrent_label_check and normalized_label is not None else None)
         candidates = self.services.segment_point(camera.image, pixel_xy)
         pixel_x = int(pixel_xy[0])
         pixel_y = int(pixel_xy[1])
@@ -1568,7 +1591,7 @@ class ToolCapabilityBackend(PoseCandidateToolMixin, MotionToolMixin):
         semantic_distance: float | None = None
         semantic_consistent = True
         if normalized_label is not None:
-            semantic_point = self.services.point(
+            semantic_point = label_point.result() if label_point is not None else self.services.point(
                 camera.image,
                 normalized_label,
             )
@@ -9866,6 +9889,18 @@ def _transform_from_pose(
     transform[:3, :3] = _quaternion_wxyz_to_matrix(quaternion)
     transform[:3, 3] = _finite_vector(position, 3, "position")
     return transform
+
+
+_SERVICE_POOL = None
+
+
+def _service_pool():
+    """Shared worker threads for concurrent service requests (created on first use)."""
+    global _SERVICE_POOL
+    if _SERVICE_POOL is None:
+        from concurrent.futures import ThreadPoolExecutor
+        _SERVICE_POOL = ThreadPoolExecutor(max_workers=2, thread_name_prefix="service-request")
+    return _SERVICE_POOL
 
 
 def _filter_point_cloud_noise(points: np.ndarray) -> np.ndarray:
