@@ -31,9 +31,18 @@ import time
 
 import numpy as np
 from PIL import Image
+from pydantic import BaseModel
 
 MODEL_NAME = "moge2"
 DEFAULT_CHECKPOINT = "Ruicheng/moge-2-vitl-normal"
+
+
+# Module level on purpose: with `from __future__ import annotations` FastAPI resolves the endpoint's `req: Request`
+# annotation from module globals; a class defined inside main() is not found and the body becomes a query param (422).
+class Request(BaseModel):
+    rgb_png_base64: str
+    intrinsics_3x3: list[float] | None = None
+    model: str | None = None
 
 
 class MoGeEstimator:
@@ -76,14 +85,8 @@ def main() -> None:
 
     import uvicorn
     from fastapi import FastAPI, HTTPException
-    from pydantic import BaseModel
 
     est = MoGeEstimator(args.device, args.checkpoint, args.resolution_level)
-
-    class Request(BaseModel):
-        rgb_png_base64: str
-        intrinsics_3x3: list[float] | None = None
-        model: str | None = None
 
     app = FastAPI()
 

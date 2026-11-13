@@ -798,7 +798,15 @@ class EpisodeServerState:
                     "message": payload.get("message"), "value": payload.get("value"),
                     "diagnostics": payload.get("diagnostics"), "error": error_text, "receipt": payload.get("receipt"),
                 }, sort_keys=True, default=repr) + "\n")
+            if self._compact_values():   # agent-facing summary + full result in workspace values/ (host records stay full)
+                from captain_harness.server.compact_values import compact_result
+                payload = compact_result(payload, workspace=self.images_dir.parent, call_index=index, name=name)
             return payload
+
+    def _compact_values(self) -> bool:
+        from captain_harness.server.task_markdown import COMPACT_PROFILE
+        overrides = getattr(self.adapter, "task_markdown_overrides", None) or {}
+        return overrides.get("profile") == COMPACT_PROFILE
 
     # ----------------------------------------------------------------- finish
     def _gate_verdict(self) -> Mapping[str, Any] | None:
