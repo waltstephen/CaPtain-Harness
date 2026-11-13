@@ -80,6 +80,31 @@ def test_client_applies_the_chunk_and_sends_thinking_budget_only_when_set():
     assert stats["images_dropped"] == 6 and stats["images"] == 7
 
 
+def test_sticky_cap_keeps_omitted_images_omitted_after_a_compaction():
+    """A compaction removes turns; without sticky the oldest images come back under the cap and are omitted again at the
+    next drop (two early rewrites); sticky keeps them omitted, and an identical newer frame stays visible."""
+    def img(name):
+        return {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{name}"}}
+    def msgs(names, last=("z",)):
+        return ([{"role": "user", "content": [img(n) for n in names]}]
+                + [{"role": "user", "content": [img(n)]} for n in last])
+    first = [f"a{i}" for i in range(14)]
+    sticky: set[str] = set()
+    m = msgs(first)
+    assert cap_images(m, 12, 6, sticky=sticky) == 6
+    assert sum(p["type"] == "image_url" for p in m[0]["content"]) == 8
+    after = msgs(first[:2] + first[10:])           # compaction removed a2..a9; a0, a1 were omitted before
+    plain = msgs(first[:2] + first[10:])
+    cap_images(plain, 12, 6)
+    assert plain[0]["content"][0]["type"] == "image_url"           # release: restored
+    cap_images(after, 12, 6, sticky=sticky)
+    assert [p["type"] for p in after[0]["content"][:2]] == ["text", "text"]
+    assert all(p["type"] == "image_url" for p in after[0]["content"][2:])
+    again = msgs(["a0", "b"], last=("a0",))        # leading run only, never the last message
+    cap_images(again, 12, 6, sticky=sticky)
+    assert [p["type"] for p in again[0]["content"]] == ["text", "image_url"] and again[1]["content"][0]["type"] == "image_url"
+
+
 # --------------------------------------------------------------------------- env-server start polling
 class _Alive:
     def poll(self):

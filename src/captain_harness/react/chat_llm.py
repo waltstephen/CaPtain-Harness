@@ -27,6 +27,7 @@ samples, so what a student is trained on is exactly what it is served.
 """
 from __future__ import annotations
 
+import hashlib
 import http.client
 import json
 import os
@@ -342,30 +343,53 @@ def responses_to_chat_messages(instructions: str | None, items: Iterable[dict[st
     return messages
 
 
-def cap_images(messages: list[dict[str, Any]], max_images: int | None, chunk: int = 1) -> int:
+def cap_images(messages: list[dict[str, Any]], max_images: int | None, chunk: int = 1,
+               sticky: set[str] | None = None) -> int:
     """Keep only the ``max_images`` most recent image parts (in place); returns how many were replaced.
 
     ``chunk`` > 1 drops the oldest images in multiples of ``chunk``, so the model sees between max_images - chunk + 1
     and max_images images and the rendered prompt only changes at an early position every ``chunk`` new images
-    (append-only in between: the server's prefix cache keeps hitting). chunk=1 is the release behaviour."""
+    (append-only in between: the server's prefix cache keeps hitting). chunk=1 is the release behaviour.
+
+    ``sticky`` (a set kept by the caller across requests; None = release): an image once replaced stays replaced in
+    later requests. Without it, a context compaction that removes turns brings images that were already omitted back
+    under the cap, and the next drop omits them again (two early rewrites of the prompt). Omission always takes the
+    oldest images, so only the leading run of previously omitted images (by URL) is replaced again; an identical
+    newer frame (a static scene renders the same bytes) after a kept image, or in the last message, stays visible."""
     if not max_images or max_images <= 0:
         return 0
     if chunk < 1:
         raise ValueError("image drop chunk must be >= 1")
+    placeholder = {"type": "text", "text": IMAGE_OMITTED_TEXT.format(n=max_images)}
     positions: list[tuple[int, int]] = []
+    replaced = 0
+    leading = sticky is not None
     for m_index, message in enumerate(messages):
         content = message.get("content")
         if isinstance(content, list):
             for p_index, part in enumerate(content):
                 if isinstance(part, dict) and part.get("type") == "image_url":
-                    positions.append((m_index, p_index))
+                    if leading and m_index < len(messages) - 1 and _image_key(part) in sticky:
+                        content[p_index] = dict(placeholder)
+                        replaced += 1
+                    else:
+                        leading = False
+                        positions.append((m_index, p_index))
     excess = len(positions) - max_images
     if excess <= 0:
-        return 0
+        return replaced
     drop = min(len(positions), -(-excess // chunk) * chunk)
     for m_index, p_index in positions[:drop]:
-        messages[m_index]["content"][p_index] = {"type": "text", "text": IMAGE_OMITTED_TEXT.format(n=max_images)}
-    return drop
+        if sticky is not None:
+            sticky.add(_image_key(messages[m_index]["content"][p_index]))
+        messages[m_index]["content"][p_index] = dict(placeholder)
+    return replaced + drop
+
+
+def _image_key(part: dict[str, Any]) -> str:
+    url = part.get("image_url")
+    url = url.get("url") if isinstance(url, dict) else url
+    return hashlib.sha1(str(url).encode()).hexdigest()
 
 
 # ----------------------------------------------------------------------------- reply
@@ -455,6 +479,8 @@ class ChatCompletionsClient:
     image_drop_chunk: int = 1                       # cap_images chunk (1 = release behaviour)
     thinking_token_budget: int | None = None        # vLLM request field: reasoning tokens before </think> is forced
     stream_exec: Any = None                         # react.stream_exec.StreamExec: stream the completion (None = release, stream False)
+    image_cap_sticky: bool = False                  # cap_images sticky: omitted images stay omitted (False = release)
+    _omitted_images: set[str] = field(default_factory=set, init=False, repr=False)
 
     @property
     def url(self) -> str:
@@ -467,7 +493,8 @@ class ChatCompletionsClient:
         tools, custom = convert_tools(body, items, allow=None if self.all_tools else IMPLEMENTED_TOOLS)
         messages = responses_to_chat_messages(body.get("instructions"), items, history_reasoning=self.history_reasoning,
                                               keep_detail=self.keep_image_detail, hoist_tool_images=self.hoist_tool_images)
-        dropped = cap_images(messages, self.max_images, self.image_drop_chunk)
+        dropped = cap_images(messages, self.max_images, self.image_drop_chunk,
+                             sticky=self._omitted_images if self.image_cap_sticky else None)
         grayed = gray_out_images(messages) if os.environ.get("CAPTAIN_GRAY_IMAGES") == "1" else None
         request: dict[str, Any] = {"model": body.get("model"), "messages": messages, "stream": False}
         if tools:

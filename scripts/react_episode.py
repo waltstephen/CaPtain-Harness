@@ -95,6 +95,7 @@ def main() -> int:
     p.add_argument("--enable-thinking", choices=("server", "on", "off"), default="server", help="chat: chat_template_kwargs.enable_thinking")
     p.add_argument("--max-images", type=int, default=16, help="chat: keep only the N most recent images in the replayed history (vLLM --limit-mm-per-prompt)")
     p.add_argument("--image-drop-chunk", type=int, default=1, help="chat: drop the oldest images in multiples of N once --max-images is exceeded, so the prompt stays append-only (prefix cache hits) for N new images in a row; 1 = drop one at a time (release)")
+    p.add_argument("--image-cap-sticky", action="store_true", help="chat: an image once omitted by the --max-images cap stays omitted in later requests (a context compaction would otherwise bring old images back under the cap and the next drop rewrite the prompt again); release: off")
     p.add_argument("--thinking-token-budget", type=int, default=None, help="chat: request field thinking_token_budget (vLLM: reasoning tokens before </think> is forced); omitted when unset")
     p.add_argument("--stream-exec", action="store_true", help="chat + python-runtime/v1: stream the completion and run the python cell's complete top-level statements while the rest is still decoding (release: off)")
     p.add_argument("--no-history-reasoning", action="store_true", help="chat: do not replay earlier reasoning_content (saves context; Qwen convention is to keep it within one agentic turn)")
@@ -182,7 +183,7 @@ def main() -> int:
     speed_options = {name: value for name, value, default in (
         ("image_drop_chunk", args.image_drop_chunk, 1), ("thinking_token_budget", args.thinking_token_budget, None),
         ("server_poll_s", args.server_poll_s, 1.0), ("server_grace_s", args.server_grace_s, 0.5),
-        ("stream_exec", args.stream_exec, False)) if value != default}
+        ("stream_exec", args.stream_exec, False), ("image_cap_sticky", args.image_cap_sticky, False)) if value != default}
     if speed_options:
         result["speed_options"] = speed_options
     termination = "infrastructure_error"
@@ -296,7 +297,8 @@ def main() -> int:
                     enable_thinking=None if args.enable_thinking == "server" else (args.enable_thinking == "on"),
                     max_images=args.max_images, history_reasoning=not args.no_history_reasoning, all_tools=args.all_tools,
                     hoist_tool_images=args.hoist_tool_images, event_sink=sink,
-                    image_drop_chunk=args.image_drop_chunk, thinking_token_budget=args.thinking_token_budget, stream_exec=stream)
+                    image_drop_chunk=args.image_drop_chunk, thinking_token_budget=args.thinking_token_budget, stream_exec=stream,
+                    image_cap_sticky=args.image_cap_sticky)
             else:
                 client = ResponsesClient(args.endpoint, auth=args.auth, event_sink=sink)
             if args.replay_prefix is not None:
