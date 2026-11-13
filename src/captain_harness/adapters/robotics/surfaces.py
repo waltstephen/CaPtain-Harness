@@ -9,7 +9,8 @@ def support_plane(scene_points, target_points, neighborhood_m):
     nearby = scene_points[np.linalg.norm(scene_points - center, axis=1) <= extent + neighborhood_m]
     # Exclude measured target samples only, not a bounding-box hole in the scene.
     if len(nearby):
-        distances, _ = cKDTree(target_points).query(nearby)
+        # bounded, parallel query: only "within 3 mm" matters (misses are inf); the bound is exclusive, hence the epsilon
+        distances, _ = cKDTree(target_points).query(nearby, distance_upper_bound=.003 * (1 + 1e-9), workers=-1)
         nearby = nearby[distances > .003]
     if len(nearby) < 30:
         return None
