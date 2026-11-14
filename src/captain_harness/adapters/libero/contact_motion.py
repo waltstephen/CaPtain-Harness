@@ -18,6 +18,11 @@ from captain_harness.adapters.robotics.cartesian_path_timing import (
 from captain_harness.adapters.robotics.motion_precision import motion_precision
 from captain_harness.ports.capability import CapabilityResult, FailureCategory
 
+import os as _os
+# floor of the setpoint lead before tracking_error_limit (m, rad); a lagging real servo arm raises these via the environment
+COMMAND_LEAD_MIN_M = float(_os.environ.get("CAPTAIN_COMMAND_LEAD_MIN_M", ".006"))
+COMMAND_LEAD_MIN_RAD = float(_os.environ.get("CAPTAIN_COMMAND_LEAD_MIN_RAD", ".06"))
+
 
 def _pose(state):
     pose = np.eye(4)
@@ -282,8 +287,8 @@ class ContactMotionMixin:
         # Allow at most two native command increments ahead, with a tracking-scale
         # floor so slow impedance motion can still overcome breakaway load.
         # These limits do not shrink with requested final-position tolerance.
-        command_lead_m=min(.02*speed_scale,max(.006,2.*speed_scale*max_speed_m_s/self._control_frequency))
-        command_lead_rad=min(.1*speed_scale,max(.06,2.*speed_scale*max_angular_speed_rad_s/self._control_frequency))
+        command_lead_m=min(max(.02*speed_scale,COMMAND_LEAD_MIN_M),max(COMMAND_LEAD_MIN_M,2.*speed_scale*max_speed_m_s/self._control_frequency))
+        command_lead_rad=min(max(.1*speed_scale,COMMAND_LEAD_MIN_RAD),max(COMMAND_LEAD_MIN_RAD,2.*speed_scale*max_angular_speed_rad_s/self._control_frequency))
         if detector is not None and contact_mode == 'manipulation':
             # Let the impedance reference run ahead of a loaded EEF instead of tripping the tracking limit.
             command_lead_m *= 2.

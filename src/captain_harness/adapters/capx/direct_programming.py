@@ -9,6 +9,11 @@ from captain_harness.ports.deadline import check_deadline, DeadlineExceeded
 from .motion_tools import pose_matrix, quaternion
 from .direct_geometry import detection_handles, selected_geometry
 
+import os as _os
+# path IK acceptance (m, rad); real robots with calibrated-twin mismatch raise these via the environment
+IK_POSITION_TOL = float(_os.environ.get("CAPTAIN_IK_POSITION_TOL", ".001"))
+IK_ORIENTATION_TOL = float(_os.environ.get("CAPTAIN_IK_ORIENTATION_TOL", ".01"))
+
 PERCEPTION = frozenset({"observe", "segment", "select_detection", "point", "mark_point",
     "get_robot_state", "gripper_state", "track_target", "read_motion_trajectory"})
 USAGE = "Control this robot by writing Python from public images and measurements.\nmove_to(position=..., quaternion=...) commands the calibrated EEF in robot_base, wxyz.\nThe EEF site is near the finger-pad midpoint, not the wrist or palm. Use the\npublished end_effector_geometry; do not add an assumed finger length. Use its closing_axis_eef rotated by YOUR requested EEF quaternion for jaw direction, never an assumed EEF Y axis.\nmove_to(gripper='close') or 'open' changes only the jaws. Jaw commands persist.\nhold(duration_s) keeps the current measured EEF pose and jaw command while time advances.\nA physical request suspends Python and supplies fresh images to YOU under the host suspension rules (failure, rejection, decision needed, batch limit or checkpoint()).\nAfter reviewing them, emit only resume('current continuation id') to continue the saved stack,\nor write replacement Python to cancel the old stack in the same persistent namespace.\nFunctions, variables and loop locals persist. last_action_result is the physical receipt.\nYou choose contacts, approaches, lifts, holds, transports, release and recovery.\nNo target detection, carrying declaration or grasp macro is required for physical commands.\nThe driver checks bounded robot IK/self collision and monitors force and tracking.\nIt follows your straight Cartesian/shortest-rotation path without detours or pose corrections.\nAbsolute pose tolerances default to 0.003 m / 0.03 rad; set position_tolerance_m and\norientation_tolerance_rad explicitly for tighter corrections. Unattainable precision fails visibly.\nScene contact is part of your plan; use current images and the actual controller feedback.\ncheck_motion is OPTIONAL pure geometry for your specified goal and explicit public target\nhypotheses. Its partial scene/proxy assessment is not a physical permission, collision-free\ncertificate, attachment verdict or task decision. A failed query does not disable move_to.\nUse perception and transform_pose when useful. No candidate/refine/grasp/place macros exist.\nInspect for missed grasp, slip and loss of identity after each action. Neither aperture,\ntool success nor a completed hold proves object retention. Explain the expected visual effect\nbefore each physical continuation and compare it with the newest images."
@@ -684,7 +689,7 @@ class DirectProgramming:
         for index,pose in enumerate(path[1:],1):
             check_deadline()
             solved=model.solve_ik(pose,seed,aperture=scene.aperture,
-                position_tolerance=.001, orientation_tolerance=.01)
+                position_tolerance=IK_POSITION_TOL, orientation_tolerance=IK_ORIENTATION_TOL)
             joints=solved
             if joints is None:
                 return CapabilityResult.failed(FailureCategory.IK_FAILURE,
@@ -805,7 +810,7 @@ class DirectProgramming:
         for index,pose in enumerate(path[1:],1):
             check_deadline()
             solved=model.solve_ik(pose,seed,aperture=aperture,
-                position_tolerance=.001,orientation_tolerance=.01)
+                position_tolerance=IK_POSITION_TOL,orientation_tolerance=IK_ORIENTATION_TOL)
             if solved is None:
                 return CapabilityResult.failed(FailureCategory.IK_FAILURE,
                     "requested_cartesian_path_ik_unavailable",value={"sample_index":index,"ik":model.last_ik,
