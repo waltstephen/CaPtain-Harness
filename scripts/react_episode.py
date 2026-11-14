@@ -300,7 +300,8 @@ def main() -> int:
                         runtime_tool_contract=args.runtime_tool_contract, environment_preflight=environment_preflight,
                         python_runner=python_runner, before_tools=before_tools,
                         tool_description=python_session.tool_description(args.python_cell_timeout) if python_mode else None,
-                        incomplete_nudges=args.incomplete_nudges if args.api == "chat" else 0, incomplete_nudge_text=INCOMPLETE_NUDGE_TEXT)
+                        incomplete_nudges=args.incomplete_nudges if args.api == "chat" else 0, incomplete_nudge_text=INCOMPLETE_NUDGE_TEXT,
+                        empty_turn_retries=int(os.environ.get("CAPTAIN_EMPTY_TURN_RETRIES", "0")))
             if args.handoff == "clean":
                 if args.replay_prefix is None or not python_mode or not info.get("driver_token"):
                     raise ValueError("--handoff clean needs --replay-prefix, python-runtime/v1 and an env server that issues a driver token")

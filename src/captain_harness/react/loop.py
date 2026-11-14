@@ -70,6 +70,10 @@ class Loop:
     workspace: Path | None = None      # listed in the drop notice
     incomplete_nudges: int = 0          # chat backends: user nudges after a length-truncated reply without tool calls
     incomplete_nudge_text: str = ""
+    # resample a completed reply that has no tool call (and the environment is not finished) instead of ending the
+    # episode; the reply is dropped from the history, so the model sees the same context again. Real arm 11-14:
+    # a call leaked into the reasoning text ("</parameter></function></tool_call>") ended web_1114_211019 at 72 s.
+    empty_turn_retries: int = 0
     stop_when: Callable[[], bool] | None = None   # caller's hook, checked before each request (e.g. "the environment is done")
     runtime_tool_contract: str | None = None
     environment_preflight: dict[str, Any] | None = None
@@ -187,6 +191,7 @@ class Loop:
         reasoning_items = 0
         assistant_messages = 0
         nudges = 0
+        empty_retries = 0
         audit_complete = True
         try:
             while True:
@@ -260,8 +265,16 @@ class Loop:
                         self.events.write({"type": "incomplete_nudge", "count": nudges, "response_id": result.response_id})
                         self._write_transcript()
                         continue
+                    if (result.status != "incomplete" and empty_retries < self.empty_turn_retries
+                            and not (self.stop_when is not None and self.stop_when())):
+                        empty_retries += 1
+                        del self.history[len(self.history) - len(result.items):]
+                        self.events.write({"type": "empty_turn_resample", "count": empty_retries,
+                                           "response_id": result.response_id})
+                        continue
                     break
                 tool_calls += len(calls)
+                empty_retries = 0   # the retry budget is per reply, not per episode
                 if self.before_tools is not None:
                     self.before_tools(requests)
                 for output in self._execute(calls):

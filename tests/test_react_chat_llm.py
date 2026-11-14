@@ -360,3 +360,28 @@ def test_chat_parts_drop_invalid_image_urls():
                          {"type": "input_image", "image_url": "data:image/png;base64,iVBORw0KGgoAAAAAAAAAAAA=", "detail": "high"}])
     assert [p["type"] for p in parts] == ["text", "text", "text", "image_url"]
     assert parts[1]["text"].startswith("[image dropped") and parts[3]["image_url"]["url"].startswith("data:image/png")
+
+
+def test_reply_without_tool_call_is_resampled_from_the_same_context(harness, tmp_path):
+    ws, router = harness
+    broken = "<tool_call>\n<function=exec_command>\n<parameter=cmd>\nbroken\n</parameter>\n</function>\n</tool_call>"
+    fake = FakeChat([
+        _completion({"content": broken, "reasoning": "leaked call"}),
+        _completion({"content": "", "tool_calls": [{"id": "call_1", "type": "function", "function": {"name": "exec_command", "arguments": json.dumps({"cmd": "echo two"})}}]}, finish="tool_calls"),
+        _completion({"content": broken}),
+        _completion({"content": broken}),
+    ])
+    client = ChatCompletionsClient(fake.url)
+    profile = with_context_window(profile_for("Qwen/Student", fallback="gpt-5.5"), 131072)
+    body, items = render_request(profile, model="Qwen/Student", workspace=ws, prompt="go")
+    loop = Loop(client=client, body=body, history=items, router=router, profile=profile, output_dir=tmp_path / "ep" / "driver",
+                prompt_cache_key="k", empty_turn_retries=1)
+    result = loop.run()
+    # 1: broken -> resampled; 2: tool call; 3: broken -> resampled; 4: broken again -> retries spent, turn ends
+    assert result.termination == "completed" and result.requests == 4 and result.tool_calls == 1
+    first, second = fake.requests[0][1]["messages"], fake.requests[1][1]["messages"]
+    assert second == first  # the dropped reply never reaches the model's context
+    fourth = fake.requests[3][1]["messages"]
+    assert fourth == fake.requests[2][1]["messages"] and fourth[-1]["role"] == "tool"
+    events = [json.loads(l) for l in (tmp_path / "ep" / "driver" / "events.jsonl").read_text().splitlines()]
+    assert [e["count"] for e in events if e["type"] == "empty_turn_resample"] == [1, 1]
