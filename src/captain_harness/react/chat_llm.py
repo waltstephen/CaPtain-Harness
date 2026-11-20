@@ -27,6 +27,7 @@ samples, so what a student is trained on is exactly what it is served.
 """
 from __future__ import annotations
 
+import hashlib
 import http.client
 import json
 import os
@@ -342,23 +343,53 @@ def responses_to_chat_messages(instructions: str | None, items: Iterable[dict[st
     return messages
 
 
-def cap_images(messages: list[dict[str, Any]], max_images: int | None) -> int:
-    """Keep only the ``max_images`` most recent image parts (in place); returns how many were replaced."""
+def cap_images(messages: list[dict[str, Any]], max_images: int | None, chunk: int = 1,
+               sticky: set[str] | None = None) -> int:
+    """Keep only the ``max_images`` most recent image parts (in place); returns how many were replaced.
+
+    ``chunk`` > 1 drops the oldest images in multiples of ``chunk``, so the model sees between max_images - chunk + 1
+    and max_images images and the rendered prompt only changes at an early position every ``chunk`` new images
+    (append-only in between: the server's prefix cache keeps hitting). chunk=1 is the release behaviour.
+
+    ``sticky`` (a set kept by the caller across requests; None = release): an image once replaced stays replaced in
+    later requests. Without it, a context compaction that removes turns brings images that were already omitted back
+    under the cap, and the next drop omits them again (two early rewrites of the prompt). Omission always takes the
+    oldest images, so only the leading run of previously omitted images (by URL) is replaced again; an identical
+    newer frame (a static scene renders the same bytes) after a kept image, or in the last message, stays visible."""
     if not max_images or max_images <= 0:
         return 0
+    if chunk < 1:
+        raise ValueError("image drop chunk must be >= 1")
+    placeholder = {"type": "text", "text": IMAGE_OMITTED_TEXT.format(n=max_images)}
     positions: list[tuple[int, int]] = []
+    replaced = 0
+    leading = sticky is not None
     for m_index, message in enumerate(messages):
         content = message.get("content")
         if isinstance(content, list):
             for p_index, part in enumerate(content):
                 if isinstance(part, dict) and part.get("type") == "image_url":
-                    positions.append((m_index, p_index))
+                    if leading and m_index < len(messages) - 1 and _image_key(part) in sticky:
+                        content[p_index] = dict(placeholder)
+                        replaced += 1
+                    else:
+                        leading = False
+                        positions.append((m_index, p_index))
     excess = len(positions) - max_images
     if excess <= 0:
-        return 0
-    for m_index, p_index in positions[:excess]:
-        messages[m_index]["content"][p_index] = {"type": "text", "text": IMAGE_OMITTED_TEXT.format(n=max_images)}
-    return excess
+        return replaced
+    drop = min(len(positions), -(-excess // chunk) * chunk)
+    for m_index, p_index in positions[:drop]:
+        if sticky is not None:
+            sticky.add(_image_key(messages[m_index]["content"][p_index]))
+        messages[m_index]["content"][p_index] = dict(placeholder)
+    return replaced + drop
+
+
+def _image_key(part: dict[str, Any]) -> str:
+    url = part.get("image_url")
+    url = url.get("url") if isinstance(url, dict) else url
+    return hashlib.sha1(str(url).encode()).hexdigest()
 
 
 # ----------------------------------------------------------------------------- reply
@@ -445,6 +476,11 @@ class ChatCompletionsClient:
     timeout_s: float = 900.0
     connect_timeout_s: float = 60.0
     event_sink: Callable[[dict[str, Any]], None] | None = None
+    image_drop_chunk: int = 1                       # cap_images chunk (1 = release behaviour)
+    thinking_token_budget: int | None = None        # vLLM request field: reasoning tokens before </think> is forced
+    stream_exec: Any = None                         # react.stream_exec.StreamExec: stream the completion (None = release, stream False)
+    image_cap_sticky: bool = False                  # cap_images sticky: omitted images stay omitted (False = release)
+    _omitted_images: set[str] = field(default_factory=set, init=False, repr=False)
 
     @property
     def url(self) -> str:
@@ -457,7 +493,8 @@ class ChatCompletionsClient:
         tools, custom = convert_tools(body, items, allow=None if self.all_tools else IMPLEMENTED_TOOLS)
         messages = responses_to_chat_messages(body.get("instructions"), items, history_reasoning=self.history_reasoning,
                                               keep_detail=self.keep_image_detail, hoist_tool_images=self.hoist_tool_images)
-        dropped = cap_images(messages, self.max_images)
+        dropped = cap_images(messages, self.max_images, self.image_drop_chunk,
+                             sticky=self._omitted_images if self.image_cap_sticky else None)
         grayed = gray_out_images(messages) if os.environ.get("CAPTAIN_GRAY_IMAGES") == "1" else None
         request: dict[str, Any] = {"model": body.get("model"), "messages": messages, "stream": False}
         if tools:
@@ -474,6 +511,11 @@ class ChatCompletionsClient:
             request["top_p"] = self.top_p
         if self.enable_thinking is not None:
             request["chat_template_kwargs"] = {"enable_thinking": bool(self.enable_thinking)}
+        if self.thinking_token_budget is not None:
+            request["thinking_token_budget"] = int(self.thinking_token_budget)
+        if self.stream_exec is not None:
+            request["stream"] = True
+            request["stream_options"] = {"include_usage": True}
         for key, value in self.extra_body.items():
             request.setdefault(key, value)
         stats = {"messages": len(messages), "images_dropped": dropped,
@@ -485,6 +527,15 @@ class ChatCompletionsClient:
 
     # ------------------------------------------------------------------ public
     def respond(self, body: dict[str, Any]) -> ResponseResult:
+        if self.stream_exec is None:
+            return self._respond(body)
+        self.stream_exec.begin_response()
+        try:
+            return self._respond(body)
+        finally:
+            self.stream_exec.end_response()
+
+    def _respond(self, body: dict[str, Any]) -> ResponseResult:
         started = time.monotonic()
         request, custom, stats = self.build_request(body)
         if stats["images_dropped"]:
@@ -551,6 +602,8 @@ class ChatCompletionsClient:
                 conn.request("POST", path, body=payload, headers=self._headers())
                 conn.sock.settimeout(self.timeout_s)
                 response = conn.getresponse()
+                if request.get("stream") and response.status == 200:
+                    return self._read_stream(response)
                 text = response.read().decode("utf-8", errors="replace")
             except (socket.timeout, TimeoutError):
                 raise RetryableModelError("timeout waiting for the chat completion", kind="stream")
@@ -567,6 +620,70 @@ class ChatCompletionsClient:
                 conn.close()
             except Exception:
                 pass
+
+    def _read_stream(self, response: Any) -> dict[str, Any]:
+        """Assemble a streamed chat completion (server-sent events) into the non-streaming payload shape; the first tool
+        call's growing arguments go to ``stream_exec.tool_input`` as they arrive."""
+        payload: dict[str, Any] = {"id": None, "model": None, "usage": None}
+        reasoning: list[str] = []
+        content: list[str] = []
+        calls: dict[int, dict[str, Any]] = {}
+        finish_reason = None
+        complete = False
+        for raw in response:
+            line = raw.decode("utf-8", errors="replace").strip()
+            if not line.startswith("data:"):
+                continue
+            data = line[5:].strip()
+            if data == "[DONE]":
+                complete = True
+                break
+            try:
+                chunk = json.loads(data)
+            except json.JSONDecodeError as exc:
+                raise RetryableModelError(f"invalid JSON in the stream: {exc}", kind="stream")
+            if not isinstance(chunk, dict):
+                continue
+            if chunk.get("error"):
+                raise RetryableModelError(f"stream error: {json.dumps(chunk['error'])[:500]}", kind="stream")
+            payload["id"] = payload["id"] or chunk.get("id")
+            payload["model"] = payload["model"] or chunk.get("model")
+            if chunk.get("usage"):
+                payload["usage"] = chunk["usage"]
+            for choice in chunk.get("choices") or []:
+                if not isinstance(choice, dict) or choice.get("index", 0) != 0:
+                    continue
+                finish_reason = choice.get("finish_reason") or finish_reason
+                delta = choice.get("delta") if isinstance(choice.get("delta"), dict) else {}
+                piece = delta.get("reasoning_content") or delta.get("reasoning")
+                if isinstance(piece, str):
+                    reasoning.append(piece)
+                if isinstance(delta.get("content"), str):
+                    content.append(delta["content"])
+                for call_delta in delta.get("tool_calls") or []:
+                    if not isinstance(call_delta, dict):
+                        continue
+                    index = int(call_delta.get("index") or 0)
+                    call = calls.setdefault(index, {"id": None, "type": "function", "function": {"name": "", "arguments": ""}})
+                    call["id"] = call_delta.get("id") or call["id"]
+                    function = call_delta.get("function") if isinstance(call_delta.get("function"), dict) else {}
+                    if function.get("name"):
+                        call["function"]["name"] += str(function["name"])
+                    if isinstance(function.get("arguments"), str):
+                        call["function"]["arguments"] += function["arguments"]
+                    try:
+                        self.stream_exec.tool_input(index, call["function"]["name"], call["function"]["arguments"])
+                    except Exception as exc:  # noqa: BLE001 - early execution must never break the request
+                        self._emit({"event": "stream_exec_error", "error": f"{type(exc).__name__}: {exc}"[:300]})
+        if not complete:
+            raise RetryableModelError("the chat completion stream ended before [DONE]", kind="stream")
+        message: dict[str, Any] = {"role": "assistant", "content": "".join(content) if content else None}
+        if reasoning:
+            message["reasoning_content"] = "".join(reasoning)
+        if calls:
+            message["tool_calls"] = [calls[index] for index in sorted(calls)]
+        return {"id": payload["id"], "model": payload["model"], "usage": payload["usage"],
+                "choices": [{"index": 0, "message": message, "finish_reason": finish_reason}]}
 
     def _raise_for_status(self, status: int, text: str, headers: Any) -> None:
         code = ""

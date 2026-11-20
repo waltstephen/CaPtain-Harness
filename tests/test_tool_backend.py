@@ -388,6 +388,7 @@ def _fixture(
     dehardcoded: bool = False,
     completion_evidence: bool = False,
     v15_protocol: bool = False,
+    concurrent_label_check: bool = False,
 ) -> Fixture:
     robot = FakeRobot(tmp_path)
     services = FakeServices(robot)
@@ -396,6 +397,7 @@ def _fixture(
         services=services,
         registry=EpisodeArtifactRegistry("episode-test", ttl_s=60),
         dehardcoded=dehardcoded,
+        concurrent_label_check=concurrent_label_check,
         v15_protocol=v15_protocol,
         completion_protocol=(
             load_public_completion_protocol(
@@ -2032,6 +2034,40 @@ def test_mark_point_flags_semantic_disagreement_without_discarding_geometry(
     assert marked.success
     assert marked.value["grounding_status"] == "grounded_with_warning"
     assert "label_point_disagreement" in marked.value["quality_flags"]
+
+
+def test_concurrent_label_check_overlaps_segmentation_and_returns_the_same_result(tmp_path: Path) -> None:
+    import time
+
+    outcomes = {}
+    for concurrent in (False, True):
+        fixture = _fixture(tmp_path / str(concurrent), concurrent_label_check=concurrent)
+        observation = _invoke(fixture, ToolApiLevel.S2_HIGH_LEVEL, "get_observation", {},
+                              public_safe_release=True).value
+        segment_point = fixture.services.segment_point
+
+        def slow_segment(image, point, _inner=segment_point):
+            time.sleep(0.2)
+            return _inner(image, point)
+
+        def slow_label(image, text):
+            time.sleep(0.2)
+            return (100.0, 100.0)   # far from the marked pixel: label_point_disagreement
+
+        fixture.services.segment_point = slow_segment  # type: ignore[method-assign]
+        fixture.services.point = slow_label  # type: ignore[method-assign]
+        started = time.perf_counter()
+        marked = _invoke(fixture, ToolApiLevel.S2_HIGH_LEVEL, "mark_point",
+                         {"observation_handle": observation["observation_handle"], "camera_name": "agentview",
+                          "x_norm": 0.5, "y_norm": 0.5, "label": "bowl"}, public_safe_release=True)
+        elapsed = time.perf_counter() - started
+        assert marked.success
+        value = {k: v for k, v in marked.value.items() if not str(v).startswith("artifact://")}
+        outcomes[concurrent] = (value, elapsed)
+
+    assert outcomes[True][0] == outcomes[False][0]
+    assert "label_point_disagreement" in outcomes[True][0]["quality_flags"]
+    assert outcomes[False][1] >= 0.4 and outcomes[True][1] < 0.35
 
 
 def test_v10_mark_point_keeps_uncertain_geometry_as_information(

@@ -101,6 +101,7 @@ class CapXHttpToolServices:
         timeout_s: float = 180.0,
         retry_delay_s: float = 0.0,
         molmo_model: str = "allenai/Molmo2-8B",
+        molmo_stop_after_coords: bool = False,
     ) -> None:
         if attempts <= 0 or timeout_s <= 0 or retry_delay_s < 0:
             raise ValueError("service attempts/timeouts must be positive")
@@ -110,6 +111,9 @@ class CapXHttpToolServices:
         self.timeout_s = timeout_s
         self.retry_delay_s = retry_delay_s
         self.molmo_model = molmo_model
+        # True (opt-in speed option): Molmo stops generating once the first point's coordinates are closed (`">`); the
+        # parser reads only those coordinates, so the parsed point is the same and the trailing label is not generated
+        self.molmo_stop_after_coords = bool(molmo_stop_after_coords)
         self.request_receipts = []
 
     def _request(
@@ -308,6 +312,7 @@ class CapXHttpToolServices:
                 ],
                 "max_tokens": 1024,
                 "temperature": 0.0,
+                **({"stop": ['">'], "include_stop_str_in_output": True} if self.molmo_stop_after_coords else {}),
             },
         )
         try:

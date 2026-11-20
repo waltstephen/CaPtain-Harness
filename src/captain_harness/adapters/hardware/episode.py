@@ -59,7 +59,8 @@ def build_hardware_episode(args, output_dir: Path, log):
                 mask[int(h * (1 - mono["self_mask_bottom_fraction"])):] = True
             estimators[name] = MonoDepthSource(args.hardware_depth_url, model=mono.get("model", "moge2"), align="plane",
                                                support_plane_z_m=float(mono.get("support_plane_z_m", 0.0)),
-                                               self_masks={name: mask} if mask is not None else None)
+                                               self_masks={name: mask} if mask is not None else None,
+                                               table_footprint_m=mono.get("table_footprint_m"))
     env = XR1FacadeEnv(
         driver, robot_xml_path=robot_xml, camera_names=list(cameras),
         camera_links={name: cam["link"] for name, cam in cameras.items()},
@@ -73,7 +74,10 @@ def build_hardware_episode(args, output_dir: Path, log):
     key = ExperienceKey(environment_id=f"hardware-{args.suite}", environment_revision=config.get("robot", "hardware"),
                         tool_revisions={"sam3": "server", "molmo": "server"},
                         implementation_revision=args.experience_implementation_revision)
-    overrides = {"intro": config.get("intro", INTRO_REAL), "standards_replace": {RELATION_LIBERO: RELATION_FORWARD}}
+    # A robot config may carry its complete TASK.md overrides (e.g. the SO-ARM prompt profile, so the real arm presents
+    # the same TASK.md and tool outputs as its simulated twin); otherwise the generic real-robot intro + relation line.
+    overrides = dict(config.get("task_markdown_overrides") or
+                     {"intro": config.get("intro", INTRO_REAL), "standards_replace": {RELATION_LIBERO: RELATION_FORWARD}})
     adapter = CapXXR1EnvironmentAdapter(
         env, services=services, api_level=ToolApiLevel("S3"),
         tool_backend_options={"motion_position_tolerance_m": args.motion_position_tolerance,

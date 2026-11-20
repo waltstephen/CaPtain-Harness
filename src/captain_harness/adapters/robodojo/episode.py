@@ -104,7 +104,12 @@ def build_robodojo_episode(args, output_dir: Path, log):
                          # native step executes 25/f ticks' worth of the requested Cartesian path (all durations scale)
                          "control_frequency": int(config["control"].get("harness_frequency_hz", world.sim.control_frequency)),
                          **({"gripper_settle_min_steps": int(config["control"]["gripper_settle_min_steps"])}
-                            if config["control"].get("gripper_settle_min_steps") else {})},
+                            if config["control"].get("gripper_settle_min_steps") else {}),
+                         # r6 step-efficiency profile (RoboDojo counts every native action against the task's budget):
+                         # faster Cartesian advance per tick, slow only near a manipulation-mode endpoint, looser
+                         # "settled" motion bound, shorter gripper settle (hardware/backend.py STEP_PROFILE_KEYS).
+                         # Absent = the R5 behaviour.
+                         "step_profile": dict(config["control"].get("step_profile") or {})},
         calibration_profile=root / config.get("calibration_profile", "configs/calibration/robodojo_x5_v0.json"),
         task_markdown_overrides=overrides)
     # X5 force semantics (wrist force = PhysX joint6 incoming force, sampled once per control tick; stiff joint PD):
@@ -114,17 +119,6 @@ def build_robodojo_episode(args, output_dir: Path, log):
     XR1ActionBackend._calibration_rise_limit_n = float(config["control"].get("calibration_rise_limit_n", 30.0))
     XR1ActionBackend._force_samples_per_tick = 1.0
     XR1ActionBackend._closure_rise_limit_n = float(config["control"].get("closure_rise_limit_n", 5.0))
-    # r6 step-efficiency profile (RoboDojo counts every native action against the task's budget): faster Cartesian
-    # advance per tick, slow only near a manipulation-mode endpoint, looser "settled" motion bound, shorter gripper
-    # settle. Defaults keep the R5 behaviour when the config has no "step_profile".
-    prof = config["control"].get("step_profile") or {}
-    XR1ActionBackend._speed_scale = float(prof.get("speed_scale", 1.0))
-    XR1ActionBackend._slow_zone_m = float(prof.get("slow_zone_m", 0.0))
-    XR1ActionBackend._settle_motion_m = float(prof.get("settle_motion_m", 0.00005))
-    XR1ActionBackend._gripper_still_needed = int(prof.get("gripper_still_needed", 3))
-    XR1ActionBackend._velocity_samples = bool(prof.get("velocity_samples", False))
-    XR1ActionBackend._settle_samples_needed = int(prof.get("settle_samples_needed", 2))
-    XR1ActionBackend._gripper_near_target = float(prof.get("gripper_near_target", 0.0))
     cal_file = config["control"].get("force_calibration_file")
     if cal_file and not getattr(XR1ActionBackend, "_rd_static_cal", False):
         # fixed robot calibration measured offline (non-test layouts, robot-only quantities) instead of the per-episode

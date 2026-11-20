@@ -14,14 +14,42 @@ from .mjsim import LINK_TO_OPTICAL
 from captain_harness.adapters.libero.recorded_backend import ClosingMonitoredPossessionActionBackend
 
 
+# Opt-in step-efficiency profile of the hardware backend (RoboDojo X5 "r6"; any hardware_real / twin builder may pass
+# it as backend_options["step_profile"]). Readers (libero/contact_motion.py, libero/backend.py) use getattr with the
+# defaults below, so an instance without a profile keeps the release behaviour.
+#   speed_scale            per-tick Cartesian advance and command lead x k above the API speed caps, with a one-step-per-
+#                          tick ramp-up and a deceleration that can stop within the remaining path (default 1.0)
+#   slow_zone_m            manipulation-mode moves fall back to the requested speed inside the last N m (default 0.0)
+#   settle_motion_m        per-sample motion below which the arm counts as settled (default 0.00005)
+#   settle_samples_needed  consecutive settled samples that end a move (default 2)
+#   gripper_still_needed   still jaw samples that end a gripper command after gripper_settle_min_steps (default 3)
+#   gripper_near_target    a gripper command also ends within this open fraction of its target (default 0.0)
+#   velocity_samples       record per-tick grip-site displacement for the velocity force model (default False)
+STEP_PROFILE_KEYS = {"speed_scale": float, "slow_zone_m": float, "settle_motion_m": float,
+                     "settle_samples_needed": int, "gripper_still_needed": int, "gripper_near_target": float,
+                     "velocity_samples": bool}
+
+
+def step_profile_attributes(profile) -> dict:
+    """Validated backend attributes (`_<key>`) for a step profile mapping; unknown keys raise ValueError."""
+    profile = dict(profile or {})
+    unknown = sorted(set(profile) - set(STEP_PROFILE_KEYS))
+    if unknown:
+        raise ValueError(f"unknown step_profile keys {unknown}; expected {sorted(STEP_PROFILE_KEYS)}")
+    return {f"_{key}": STEP_PROFILE_KEYS[key](value) for key, value in profile.items()}
+
 
 class XR1ActionBackend(ClosingMonitoredPossessionActionBackend):
     """LIBERO-shaped backend whose `env` is an XR1FacadeEnv."""
 
-    def __init__(self, env, *, camera_link_to_optical=None, **kwargs) -> None:
+    def __init__(self, env, *, camera_link_to_optical=None, step_profile=None, **kwargs) -> None:
         self._xr1_env = env
         self._camera_link_to_optical = {name: np.asarray(value, float).reshape(4, 4)
                                         for name, value in (camera_link_to_optical or {}).items()}
+        # per instance (set before the parent constructor, which may already sample the robot): two backends with
+        # different profiles never interfere, and the class keeps the release defaults
+        for name, value in step_profile_attributes(step_profile).items():
+            setattr(self, name, value)
         super().__init__(env, controller="OSC_POSE", **kwargs)
 
     def camera_extrinsics(self, name: str) -> np.ndarray:

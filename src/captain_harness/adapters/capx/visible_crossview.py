@@ -45,7 +45,8 @@ def overlap_receipt(primary_points,candidate_points):
     check_deadline()
     primary=_finite_points(primary_points);candidate=np.unique(_finite_points(candidate_points),axis=0)
     count=0
-    if len(primary) and len(candidate):count=int((cKDTree(primary).query(candidate)[0]<=.003).sum())
+    if len(primary) and len(candidate):  # bounded, parallel k-NN: same count, no search beyond the tolerance
+        count=int((cKDTree(primary).query(candidate,distance_upper_bound=.003*(1+1e-9),workers=-1)[0]<=.003).sum())
     check_deadline()
     return {'supported':count>=6,'matched_candidate_samples':count,'candidate_samples':len(candidate),
         'metric_tolerance_m':.003,'required_samples':6,
